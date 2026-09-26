@@ -1,5 +1,6 @@
 import textwrap
 
+from flowmap.ir import walk
 from flowmap.lang.python.extract import extract_module
 
 
@@ -381,3 +382,65 @@ def test_type_hints_for_variables_and_fields():
     assert hints["repo"] == [("call", "Repo")]
     assert hints["x"] == [("ann", "Model"), ("call", "build")]
     assert hints["$1"] == [("call", "get_store")]
+
+
+# ── full expression text, for the simulation ──────────────────────────────
+
+
+def test_expressions_keep_their_full_text_with_nested_calls_as_temporaries():
+    mod = ex('''
+        def f(a, items, key, ok=True):
+            total = a + helper(len(items)) * 2
+            items[key] = total
+            if check(total) and total > 10:
+                pass
+            for i, x in enumerate(items):
+                pass
+            return {"total": total, "n": count(items)}
+    ''')
+    fn = mod.functions["m.py::f"]
+    assert [(p.name, p.default) for p in fn.params] == [("a", None), ("items", None), ("key", None), ("ok", "True")]
+    items = list(walk(fn.body))
+    helper = next(i for i in items if type(i).__name__ == "Call" and i.callee == "helper")
+    assert helper.args[0].expr == "__t1"  # len(items) ran first and is held in $1
+    assigns = [i for i in items if type(i).__name__ == "Assign"]
+    assert [(a.target, a.value) for a in assigns] == [("total", "a + __t2 * 2"), ("items[key]", "total")]
+    assert next(i for i in items if type(i).__name__ == "If").test == "__t3 and total > 10"
+    loop = next(i for i in items if type(i).__name__ == "Loop")
+    assert (loop.target, loop.iter) == ("i, x", "__t4")
+    assert next(i for i in items if type(i).__name__ == "Return").expr == '{"total": total, "n": __t5}'
+
+
+def test_receivers_augmented_assignment_and_while_conditions():
+    mod = ex('''
+        def f(name, x, y):
+            up = name.upper()
+            saved = get_store().save()
+            x += grow(y)
+            while more(x):
+                pass
+    ''')
+    items = list(walk(mod.functions["m.py::f"].body))
+    calls = {i.callee: i for i in items if type(i).__name__ == "Call"}
+    assert calls["name.upper"].receiver == "name"
+    assert calls["$1.save"].receiver == "__t1"
+    augmented = next(i for i in items if type(i).__name__ == "Assign")
+    assert (augmented.target, augmented.value) == ("x", "x + (__t2)")
+    loop = next(i for i in items if type(i).__name__ == "Loop")
+    assert loop.test == "__t3"
+
+
+def test_module_level_constants_are_kept():
+    mod = ex('''
+        DEFAULTS = {"db": "shop.db", "retries": 3}
+        NAME: str = "shop"
+        CLIENT = make_client()
+        def f(): pass
+    ''')
+    assert mod.constants == {"DEFAULTS": '{"db": "shop.db", "retries": 3}', "NAME": '"shop"'}
+
+
+def test_expression_sources_are_exact_when_the_file_starts_with_blank_lines():
+    mod = extract_module("m.py", b"\n\n# comment\ndef f(names):\n    for name in names:\n        pass\n")
+    loop = mod.functions["m.py::f"].body[0]
+    assert (loop.target, loop.iter) == ("name", "names")

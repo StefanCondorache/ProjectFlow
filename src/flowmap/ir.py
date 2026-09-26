@@ -12,6 +12,10 @@ Variable names in ``uses``/``defs``:
 - ``self.<field>`` for instance fields,
 - ``$1``, ``$2``... temporaries carrying the result of a nested call into the
   expression that consumes it.
+
+Expression sources (``Arg.expr``, ``Assign.value``, ``If.test``...) are full
+source text in which every nested call is replaced by its temporary, written
+``__t1`` for ``$1``, so an expression can be evaluated once its calls have run.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ class Param:
     name: str
     annotation: str | None = None
     kind: str = "normal"  # normal | vararg | kwarg
+    default: str | None = None  # source of the default value
 
 
 @dataclass
@@ -39,6 +44,7 @@ class Arg:
     uses: list[str]
     keyword: str | None = None
     star: str = ""  # "", "*" or "**"
+    expr: str = ""  # full source, nested calls replaced by their temporaries
 
 
 @dataclass
@@ -57,6 +63,7 @@ class Call:
     confidence: str = ""  # exact | inferred | guess
     external: str | None = None  # dotted name of an outside callable
     io: tuple[str, str] | None = None  # (channel, direction), e.g. ("file", "in")
+    receiver: str = ""  # source of the object a method is called on
 
 
 @dataclass
@@ -64,6 +71,8 @@ class Assign:
     defs: list[str]
     uses: list[str]
     line: int
+    target: str = ""  # source of the assignment target(s)
+    value: str = ""  # source of the value
 
 
 @dataclass
@@ -74,6 +83,7 @@ class If:
     orelse: list[Item]
     line: int
     col: int = 0
+    test: str = ""  # full source of the condition
 
 
 @dataclass
@@ -86,6 +96,9 @@ class Loop:
     orelse: list[Item]
     line: int
     col: int = 0
+    target: str = ""  # source of the loop variable(s)
+    iter: str = ""  # source of what a for loop runs over
+    test: str = ""  # source of a while loop's condition
 
 
 @dataclass
@@ -122,6 +135,7 @@ class Match:
     cases: list[Case]
     line: int
     col: int = 0
+    subject_expr: str = ""
 
 
 @dataclass
@@ -131,6 +145,7 @@ class Return:
     line: int
     kind: str = "return"  # return | yield
     col: int = 0
+    expr: str = ""  # full source of the value
 
 
 @dataclass
@@ -194,6 +209,7 @@ class Module:
     classes: dict[str, ClassDef]
     has_main_guard: bool
     globals: dict[str, list[Hint]] = field(default_factory=dict)
+    constants: dict[str, str] = field(default_factory=dict)  # module-level name -> source of its value
 
 
 def child_blocks(item: Item) -> list[list[Item]]:

@@ -1,6 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { FRAME_KINDS, roundedPath, type Placed, type PlacedNode } from "./layout";
+import { FRAME_KINDS, roundedPath, type Direction, type Placed, type PlacedNode, type Point } from "./layout";
+import { pathLength, pointAt, tokenPath, type SimFrame } from "./sim";
 import type { FlowNode } from "./types";
+
+/** A running simulation, as the diagram needs it. */
+export interface TokenRun {
+  key: string; // changes on every move
+  first: boolean; // the run just started: bring the camera in close
+  frame: SimFrame;
+  previous: SimFrame | null;
+  speed: number;
+  badge: string;
+  walked: Set<string>; // "from>to" of the arrows travelled so far
+  onArrive: () => void;
+}
 
 interface View {
   x: number;
@@ -18,12 +31,14 @@ interface Props {
   selected: string | null;
   onSelect: (id: string | null) => void;
   onToggle: (node: FlowNode) => void;
-  /** Width covered by the details panel on the right. */
-  rightInset: number;
+  /** Which way the flow runs; the view frames it accordingly. */
+  direction: Direction;
   /** Start following a piece of data from a node (absent: data labels are plain text). */
   onFollow?: (at: string, variable: string) => void;
   /** The diagram shows a data trail: steps cannot be opened or closed by hand. */
   following: boolean;
+  /** When set, a token carries the data along the diagram. */
+  run?: TokenRun | null;
 }
 
 const clamp = (value: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, value));
@@ -32,7 +47,7 @@ const cx = (...names: (string | false | null | undefined)[]) => names.filter(Boo
 const IO_CHANNEL: Record<string, string> = { file: "file", db: "database", net: "network", env: "env", process: "process", console: "console" };
 const IO_DIRECTION: Record<string, string> = { in: "in", out: "out", inout: "in/out" };
 
-export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect, onToggle, rightInset, onFollow, following }: Props) {
+export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect, onToggle, direction, onFollow, following, run }: Props) {
   const viewport = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
   const previous = useRef<{ rootKey: string; boxes: Map<string, PlacedNode> } | null>(null);
@@ -56,15 +71,24 @@ export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect
       setView({ k: whole, x: (w - placed.width * whole) / 2, y: (h - placed.height * whole) / 2 });
       return;
     }
-    const k = clamp((w - 48) / placed.width, 0.6, 1);
     const start = placed.nodes.find((p) => p.node.kind === "start" && !p.node.parent);
-    const centre = start ? start.x + start.width / 2 : placed.width / 2;
-    setView({ k, x: w / 2 - centre * k, y: 24 });
-  }, [placed]);
+    if (direction === "RIGHT") {
+      // from the left edge, centred on START
+      const k = clamp((h - 48) / placed.height, 0.6, 1);
+      const middle = start ? start.y + start.height / 2 : placed.height / 2;
+      setView({ k, x: 24 - (start ? start.x - 24 : 0) * k, y: h / 2 - middle * k });
+    } else {
+      // from the top, centred on START
+      const k = clamp((w - 48) / placed.width, 0.6, 1);
+      const centre = start ? start.x + start.width / 2 : placed.width / 2;
+      setView({ k, x: w / 2 - centre * k, y: 24 });
+    }
+  }, [placed, direction]);
 
-  // New root: opening view. Same root, new layout: keep the top-centre of the
-  // step that was opened or closed where it was, zooming out only if it no
-  // longer fits across.
+  // New root: opening view. Same root, new layout: keep the step that was
+  // opened or closed where it was on screen (its left-middle when the flow
+  // runs left to right, its top-centre when it runs down), zooming out only
+  // if it no longer fits.
   useLayoutEffect(() => {
     const before = previous.current;
     const boxes = new Map(placed.nodes.map((p) => [p.node.id, p]));
@@ -73,34 +97,108 @@ export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect
     } else if (anchor) {
       const was = before.boxes.get(anchor);
       const now = boxes.get(anchor);
-      const width = viewport.current?.clientWidth ?? 0;
-      if (was && now) {
+      const el = viewport.current;
+      if (was && now && el) {
         setView((v) => {
+          if (direction === "RIGHT") {
+            const sx = v.x + was.x * v.k;
+            const sy = v.y + (was.y + was.height / 2) * v.k;
+            const room = el.clientHeight - 48;
+            const k = now.height * v.k > room ? clamp(room / now.height, 0.35, v.k) : v.k;
+            return { k, x: sx - now.x * k, y: sy - (now.y + now.height / 2) * k };
+          }
           const sx = v.x + (was.x + was.width / 2) * v.k;
           const sy = v.y + was.y * v.k;
-          const k = width && now.width * v.k > width - 48 ? clamp((width - 48) / now.width, 0.35, v.k) : v.k;
+          const room = el.clientWidth - 48;
+          const k = now.width * v.k > room ? clamp(room / now.width, 0.35, v.k) : v.k;
           return { k, x: sx - (now.x + now.width / 2) * k, y: sy - now.y * k };
         });
       }
     }
     previous.current = { rootKey, boxes };
-  }, [placed, rootKey, anchor, openingView]);
+  }, [placed, rootKey, anchor, openingView, direction]);
 
   useEffect(() => {
     if (fitSignal) fit();
   }, [fitSignal, fit]);
 
-  // Keep the selected node out from under the details panel.
+  // Keep the selected node in view, also when a side panel opens or is dragged wider.
+  const [size, setSize] = useState({ w: 0, h: 0 });
   useEffect(() => {
     const el = viewport.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => setSize({ w: el.clientWidth, h: el.clientHeight }));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
     const box = placed.nodes.find((p) => p.node.id === selected);
-    if (!el || !box || !rightInset) return;
+    if (!box || !size.w) return;
     setView((v) => {
+      const left = v.x + box.x * v.k;
       const right = v.x + (box.x + box.width) * v.k;
-      const limit = el.clientWidth - rightInset - 24;
-      return right > limit ? { ...v, x: v.x - (right - limit) } : v;
+      if (right > size.w - 24) return { ...v, x: v.x - Math.min(right - (size.w - 24), left - 24) };
+      if (left < 24) return { ...v, x: v.x + (24 - left) };
+      return v;
     });
-  }, [selected, rightInset, placed]);
+  }, [selected, size.w, placed]);
+
+  // The simulation token: each new frame moves it along its route, then reports arrival.
+  const [token, setToken] = useState<{ x: number; y: number; angle: number } | null>(null);
+  const [gliding, setGliding] = useState(false);
+  const tokenAt = useRef<Point | null>(null);
+  const arrive = useRef<() => void>(() => undefined);
+  arrive.current = run?.onArrive ?? (() => undefined);
+  const runKey = run?.key ?? null;
+  useEffect(() => {
+    if (!run) {
+      setToken(null);
+      tokenAt.current = null;
+      return;
+    }
+    const points = tokenPath(placed, run.frame, run.previous, tokenAt.current, direction);
+    if (points.length === 0) {
+      arrive.current();
+      return;
+    }
+    // Keep the token where it can be read: close up when the run starts, then
+    // glide along whenever it heads for the edge of the view.
+    const end = points[points.length - 1];
+    const el = viewport.current;
+    if (el) {
+      setView((v) => {
+        const k = run.first ? Math.max(v.k, 0.9) : v.k;
+        const sx = v.x + end.x * k;
+        const sy = v.y + end.y * k;
+        const mx = el.clientWidth * 0.2;
+        const my = el.clientHeight * 0.2;
+        const inView = sx > mx && sx < el.clientWidth - mx && sy > my && sy < el.clientHeight - my;
+        if (!run.first && inView) return v;
+        setGliding(true);
+        window.setTimeout(() => setGliding(false), 500);
+        return { k, x: el.clientWidth / 2 - end.x * k, y: el.clientHeight / 2 - end.y * k };
+      });
+    }
+    const length = pathLength(points);
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const duration = still ? 0 : Math.min(1400, Math.max(280, length * 2.4)) / run.speed;
+    const started = performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = duration ? Math.min(1, (now - started) / duration) : 1;
+      const eased = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+      setToken(pointAt(points, eased * length));
+      if (t < 1) {
+        raf = requestAnimationFrame(tick);
+      } else {
+        tokenAt.current = end;
+        arrive.current();
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runKey, placed, direction]);
 
   // Wheel pans (long flows scroll like a document); ctrl/cmd + wheel or a pinch zooms.
   useEffect(() => {
@@ -169,9 +267,10 @@ export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect
     });
   };
 
+  const [hovered, setHovered] = useState<string | null>(null);
   const frames = placed.nodes.filter((p) => FRAME_KINDS.has(p.node.kind)).sort((a, b) => a.depth - b.depth);
   const leaves = placed.nodes.filter((p) => !FRAME_KINDS.has(p.node.kind));
-  const hot = (id: string) => selected !== null && (id === selected);
+  const hot = (id: string) => id === selected || id === hovered;
 
   return (
     <div
@@ -181,10 +280,25 @@ export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onClick={onClick}
+      onPointerOver={(event) => {
+        const hit = (event.target as HTMLElement).closest<HTMLElement>("[data-node]");
+        setHovered(hit && !FRAME_KINDS.has(hit.dataset.kind ?? "") ? hit.dataset.node! : null);
+      }}
+      onPointerLeave={() => setHovered(null)}
     >
-      <div className="world" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})` }}>
+      <div
+        className={cx("world", gliding && "is-gliding")}
+        style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})` }}
+      >
         {frames.map((p) => (
-          <FrameBox key={p.node.id} p={p} selected={hot(p.node.id)} onToggle={onToggle} following={following} />
+          <FrameBox
+            key={p.node.id}
+            p={p}
+            selected={p.node.id === selected}
+            current={run?.frame.node === p.node.id}
+            onToggle={onToggle}
+            following={following}
+          />
         ))}
         <svg className="edges" width={placed.width} height={placed.height} key={placed.edges.length + ":" + placed.width + ":" + placed.height}>
           <defs>
@@ -199,7 +313,12 @@ export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect
             <path
               key={e.id}
               d={roundedPath(e.points)}
-              className={cx("edge", `edge-${e.edge.kind}`, (hot(e.edge.source) || hot(e.edge.target)) && "is-hot")}
+              className={cx(
+                "edge",
+                `edge-${e.edge.kind}`,
+                (hot(e.edge.source) || hot(e.edge.target)) && "is-hot",
+                run?.walked.has(`${e.edge.source}>${e.edge.target}`) && "is-walked",
+              )}
               markerEnd={e.edge.kind === "error" ? "url(#arrow-error)" : "url(#arrow)"}
             />
           ))}
@@ -235,8 +354,29 @@ export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect
             ),
         )}
         {leaves.map((p) => (
-          <NodeBox key={p.node.id} p={p} selected={hot(p.node.id)} onToggle={onToggle} following={following} />
+          <NodeBox
+            key={p.node.id}
+            p={p}
+            selected={p.node.id === selected}
+            current={run?.frame.node === p.node.id}
+            onToggle={onToggle}
+            following={following}
+          />
         ))}
+        {run && token && (
+          <>
+            <svg className="token-layer" width={placed.width} height={placed.height} aria-hidden>
+              <g transform={`translate(${token.x} ${token.y})`}>
+                <circle r={13} className="token-halo" />
+                <circle r={8} className="token-core" />
+                <path d="M -4 -5 L 6 0 L -4 5 Z" className="token-arrow" transform={`rotate(${token.angle})`} />
+              </g>
+            </svg>
+            <div className="token-badge" style={{ left: token.x + 14, top: token.y - 34 }}>
+              {run.badge}
+            </div>
+          </>
+        )}
       </div>
       <div className="zoom-controls" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
         <button onClick={() => zoomBy(1.2)} title="Zoom in (ctrl + wheel)">+</button>
@@ -260,6 +400,7 @@ function tooltip(node: FlowNode): string {
 interface BoxProps {
   p: PlacedNode;
   selected: boolean;
+  current?: boolean;
   onToggle: (node: FlowNode) => void;
   following: boolean;
 }
@@ -281,7 +422,7 @@ function ToggleButton({ node, open, onToggle }: { node: FlowNode; open: boolean;
   );
 }
 
-function NodeBox({ p, selected, onToggle, following }: BoxProps) {
+function NodeBox({ p, selected, current, onToggle, following }: BoxProps) {
   const { node } = p;
   const d = node.detail;
   const style = { left: p.x, top: p.y, width: p.width, height: p.height };
@@ -292,8 +433,9 @@ function NodeBox({ p, selected, onToggle, following }: BoxProps) {
     d.inner && "is-inner",
     d.confidence === "guess" && "is-guess",
     d.trail === "origin" && "is-origin",
+    current && "is-current",
   );
-  const common = { className, style, "data-node": node.id, title: tooltip(node) };
+  const common = { className, style, "data-node": node.id, "data-kind": node.kind, title: tooltip(node) };
 
   switch (node.kind) {
     case "start":
@@ -367,7 +509,7 @@ function NodeBox({ p, selected, onToggle, following }: BoxProps) {
   }
 }
 
-function FrameBox({ p, selected, onToggle, following }: BoxProps) {
+function FrameBox({ p, selected, current, onToggle, following }: BoxProps) {
   const { node } = p;
   const style = { left: p.x, top: p.y, width: p.width, height: p.height };
   const title =
@@ -379,11 +521,16 @@ function FrameBox({ p, selected, onToggle, following }: BoxProps) {
           ? `▣ ${node.label}`
           : node.label;
   return (
-    <div className={cx("frame", `frame-${node.kind}`, selected && "is-selected")} style={style} data-node={node.id}>
+    <div
+      className={cx("frame", `frame-${node.kind}`, selected && "is-selected", current && "is-current")}
+      style={style}
+      data-node={node.id}
+      data-kind={node.kind}
+    >
       <div className="frame-head" title={tooltip(node)}>
         {node.kind === "group" && !following && <ToggleButton node={node} open onToggle={onToggle} />}
         <span className="frame-title">{title}</span>
-        {node.kind === "group" && <span className="frame-file">{node.detail.file}</span>}
+        {node.kind === "group" && <span className="frame-path">{node.detail.file}</span>}
       </div>
     </div>
   );

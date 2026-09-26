@@ -1,3 +1,4 @@
+import type { Simulation } from "./sim";
 import type { FlowGraph, ProjectInfo, SourceLines } from "./types";
 
 export interface ViewState {
@@ -9,6 +10,14 @@ export interface ViewState {
   var?: string;
   /** How a followed piece of data is shown: functions by file, or every step. */
   trailView?: "journey" | "steps";
+}
+
+export interface SearchHit {
+  id: string;
+  label: string;
+  file: string;
+  line: number;
+  doc: string | null;
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -32,11 +41,19 @@ function flowQuery(view: ViewState): string {
 
 export const api = {
   project: () => get<ProjectInfo>("api/project"),
+  search: (q: string) => get<SearchHit[]>(`api/search?${new URLSearchParams({ q })}`),
   flow: (view: ViewState) => get<FlowGraph>(`api/${view.at ? "trail" : "flow"}?${flowQuery(view)}`),
   source: (file: string, start: number, end: number) =>
     get<SourceLines>(`api/source?${new URLSearchParams({ file, start: String(start), end: String(end) })}`),
-  mermaid: async (view: ViewState) => {
-    const response = await fetch(`api/mermaid?${flowQuery(view)}`);
+  simulate: (view: ViewState, choices: Record<string, string>) => {
+    const params = new URLSearchParams({ root: view.root, expand: view.expanded.join(",") });
+    if (view.start) params.set("start", view.start);
+    const answered = Object.entries(choices).map(([node, value]) => `${node}=${value}`);
+    if (answered.length) params.set("choices", answered.join(","));
+    return get<Simulation>(`api/simulate?${params}`);
+  },
+  mermaid: async (view: ViewState, dir: "LR" | "TD") => {
+    const response = await fetch(`api/mermaid?${flowQuery(view)}&dir=${dir}`);
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
     return response.text();
   },

@@ -5,11 +5,16 @@ from flowmap.mermaid import to_mermaid
 from flowmap.project import load_project
 
 
-def mermaid_lines(tmp_path, src: str, **kw) -> list[str]:
+def mermaid_lines(tmp_path, src: str, direction: str = "LR", **kw) -> list[str]:
     (tmp_path / "m.py").write_text(textwrap.dedent(src))
-    text = to_mermaid(build_flow(load_project(tmp_path), "m.py::main", **kw))
-    assert text.startswith("flowchart TD\n")
+    text = to_mermaid(build_flow(load_project(tmp_path), "m.py::main", **kw), direction=direction)
+    assert text.startswith(f"flowchart {direction}\n")
     return [line.strip() for line in text.splitlines()]
+
+
+def test_left_to_right_is_the_default(tmp_path):
+    (tmp_path / "m.py").write_text("def main():\n    pass\n")
+    assert to_mermaid(build_flow(load_project(tmp_path), "m.py::main")).startswith("flowchart LR\n")
 
 
 def test_shapes_and_labelled_edges(tmp_path):
@@ -39,9 +44,19 @@ def test_frames_become_subgraphs_and_labels_are_escaped(tmp_path):
                     process(it)
     ''')
     start = lines.index('subgraph n1["for it in items"]')
-    assert lines[start + 1] == "direction TB"
+    assert lines[start + 1] == "direction LR"
     assert 'n2{"it != #quot;#lt;x#gt;#quot;"}' in lines[start:]
     assert "end" in lines[start:]
+
+
+def test_top_down_on_request(tmp_path):
+    lines = mermaid_lines(tmp_path, '''
+        def process(it): pass
+        def main(items):
+            for it in items:
+                process(it)
+    ''', direction="TD")
+    assert lines[lines.index('subgraph n1["for it in items"]') + 1] == "direction TB"
 
 
 def test_error_paths_are_dotted(tmp_path):

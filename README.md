@@ -14,9 +14,10 @@ opens a local viewer in the browser (it only reads the folder, never writes to i
 
 - **Entry points**: the program's starts, found on their own: Docker/compose
   commands (following shell scripts they run), `pyproject` scripts, packages run
-  with `python -m`, and `if __name__ == "__main__"` scripts. Deployed ones come first.
-- **Flow**: START at the top, END at the bottom, the steps in between in the order
-  they run. A step is a call into one of the project's own functions; `+` opens
+  with `python -m`, and `if __name__ == "__main__"` scripts, grouped with the
+  deployed ones first. The same search box finds any function by name.
+- **Flow**: START on the left, END on the right (⇄ turns it top-down), the steps
+  in between in the order they run. A step is a call into one of the project's own functions; `+` opens
   it in place, inside a frame named after its function and file. Diamonds are
   decisions, dashed frames are loops, red paths are errors, blue parallelograms
   are data entering or leaving the program (files, databases, network, env vars).
@@ -27,14 +28,27 @@ opens a local viewer in the browser (it only reads the folder, never writes to i
     function that hands it back to its caller.
   - *Steps*: the flow sliced to the data: only the steps that touch it, with every
     call it enters opened.
+- **Simulation**: ▶ Simulate sends the data through the diagram. An arrow
+  carries it along the flow, into every opened step and back out, while the
+  side panel shows the variables of the function it is in: values appear as
+  they are created and are marked *new* or *changed* as the code adds keys,
+  fields and items. Nothing is run: what can be computed from the code
+  (literals, arithmetic, pure builtins, what goes into dicts, lists and objects)
+  is shown as a value, and what only a real run would know is shown as where it
+  comes from, e.g. `‹json.load(fh)›`. When a decision depends on such a value,
+  the simulation stops and asks which way to go. Closed steps still run, silently,
+  so their results and what they do to the objects they get are not lost.
+  Space pauses, ← → step through it.
 - **Details**: click any box for its docstring, where it is defined and called,
   the data in and out, how the call was resolved, and the source.
+
+Both side panels can be dragged wider or narrower (double-click the edge to reset).
 
 Other outputs:
 
 ```
 flowmap <folder> --list                          # entry points, ranked
-flowmap <folder> --mermaid [ENTRY] [--depth N]   # Mermaid text for an entry
+flowmap <folder> --mermaid [ENTRY] [--depth N]   # Mermaid text for an entry (--vertical: top-down)
 ```
 
 `ENTRY` is a number from `--list`, part of an entry's label, or a function id

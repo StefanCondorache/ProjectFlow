@@ -86,7 +86,7 @@ export function Details({ node, following, onToggle, onEnter, onFollow, onClose 
 
   const isCall = node.kind === "step" || node.kind === "group";
   return (
-    <aside className="details">
+    <div className="details">
       <header className="details-head">
         <span className="details-kind">{KIND_NAME[node.kind] ?? node.kind}</span>
         <button className="close" onClick={onClose} aria-label="Close details" title="Close (Esc)">
@@ -202,6 +202,6 @@ export function Details({ node, following, onToggle, onEnter, onFollow, onClose 
           })}
         </pre>
       )}
-    </aside>
+    </div>
   );
 }

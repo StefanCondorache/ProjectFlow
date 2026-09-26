@@ -43,19 +43,22 @@ def _title(node: Node) -> str:
     return node.label
 
 
-def to_mermaid(graph: Graph) -> str:
+def to_mermaid(graph: Graph, direction: str = "LR") -> str:
+    """Mermaid flowchart text; ``direction`` is LR (left to right) or TD (top down)."""
+    direction = "TD" if direction.upper() in ("TD", "TB") else "LR"
+    inner = "TB" if direction == "TD" else "LR"
     ids = {n.id: f"n{i}" for i, n in enumerate(graph.nodes)}
     children: dict[str | None, list[Node]] = defaultdict(list)
     for node in graph.nodes:
         children[node.parent].append(node)
 
-    lines = ["flowchart TD"]
+    lines = [f"flowchart {direction}"]
 
     def emit(parent: str | None, indent: str) -> None:
         for node in children.get(parent, []):
             if node.kind in _FRAMES:
                 lines.append(f'{indent}subgraph {ids[node.id]}["{_esc(_title(node))}"]')
-                lines.append(f"{indent}  direction TB")
+                lines.append(f"{indent}  direction {inner}")
                 emit(node.id, indent + "  ")
                 lines.append(f"{indent}end")
             else:

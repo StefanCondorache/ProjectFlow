@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
+import time
 
 from flowmap.entries import Entry
 from flowmap.flow import build_flow
@@ -47,11 +48,19 @@ def main(argv: list[str] | None = None) -> int:
         help="print a Mermaid flowchart; ENTRY is a number from --list, part of an entry label, or a function id",
     )
     parser.add_argument("--depth", type=int, default=0, help="open steps this many levels deep (with --mermaid)")
+    parser.add_argument("--vertical", action="store_true", help="top-down Mermaid instead of left to right")
     parser.add_argument("--port", type=int, default=8765, help="viewer port (a free one is used if taken)")
     parser.add_argument("--no-open", action="store_true", help="do not open a browser")
     args = parser.parse_args(argv)
 
+    started = time.perf_counter()
+    print(f"flowmap: reading {args.path} …", file=sys.stderr)
     project = load_project(args.path)
+    print(
+        f"flowmap: {len(project.modules)} files, {len(project.functions)} functions, "
+        f"{len(project.entries)} entry points ({time.perf_counter() - started:.1f}s)",
+        file=sys.stderr,
+    )
 
     if args.mermaid:
         picked = pick_entry(project, args.mermaid)
@@ -59,7 +68,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"flowmap: no entry matches {args.mermaid!r} (see --list)", file=sys.stderr)
             return 2
         target, label = picked
-        sys.stdout.write(to_mermaid(build_flow(project, target, depth=args.depth, start_label=label)))
+        graph = build_flow(project, target, depth=args.depth, start_label=label)
+        sys.stdout.write(to_mermaid(graph, direction="TD" if args.vertical else "LR"))
         return 0
 
     if args.list:

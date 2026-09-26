@@ -88,3 +88,8 @@ it("roundedPath keeps straight runs straight and rounds the corners", () => {
   expect(roundedPath([{ x: 0, y: 0 }, { x: 0, y: 10 }, { x: 10, y: 10 }], 4)).toBe("M0,0 L0,6 Q0,10 4,10 L10,10");
   expect(roundedPath([{ x: 0, y: 0 }, { x: 0, y: 4 }, { x: 10, y: 4 }], 4)).toBe("M0,0 L0,2 Q0,4 2,4 L10,4");
 });
+
+it("lays the flow out left to right unless asked for top-down", () => {
+  expect(toElk(graph, sizing).layoutOptions!["elk.direction"]).toBe("RIGHT");
+  expect(toElk(graph, sizing, "DOWN").layoutOptions!["elk.direction"]).toBe("DOWN");
+});

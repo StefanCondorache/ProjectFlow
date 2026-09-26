@@ -39,7 +39,7 @@ _MAX_TEXT = 100
 
 def extract_module(relpath: str, source: bytes) -> Module:
     tree = _PARSER.parse(source)
-    return _ModuleExtractor(relpath, tree.root_node).run()
+    return _ModuleExtractor(relpath, tree.root_node, source).run()
 
 
 # ── small helpers ──────────────────────────────────────────────────────────
@@ -127,9 +127,15 @@ def _params(node: Node | None) -> list[Param]:
             else:
                 out.append(Param(_text(inner), ann))
         elif kind == "default_parameter":
-            out.append(Param(_text(p.child_by_field_name("name"))))
+            out.append(Param(_text(p.child_by_field_name("name")), default=_text(p.child_by_field_name("value"))))
         elif kind == "typed_default_parameter":
-            out.append(Param(_text(p.child_by_field_name("name")), _annotation(p.child_by_field_name("type"))))
+            out.append(
+                Param(
+                    _text(p.child_by_field_name("name")),
+                    _annotation(p.child_by_field_name("type")),
+                    default=_text(p.child_by_field_name("value")),
+                )
+            )
         elif kind == "list_splat_pattern":
             out.append(Param(_splat_name(p), None, "vararg"))
         elif kind == "dictionary_splat_pattern":
@@ -195,9 +201,10 @@ def _exception_types(node: Node) -> str:
 
 
 class _ModuleExtractor:
-    def __init__(self, relpath: str, root: Node):
+    def __init__(self, relpath: str, root: Node, source: bytes):
         self.file = relpath
         self.root = root
+        self.source = source  # byte offsets of nodes index into this
         self.imports: list[Import] = []
         self.functions: dict[str, Function] = {}
         self.classes: dict[str, ClassDef] = {}
@@ -224,6 +231,11 @@ class _ModuleExtractor:
         body = _Body(self, qualname="<main>", params=[], cls_id=None, self_name=None, module_level=True)
         items = body.statements(executable)
         module_globals = {k: v for k, v in body.hints.items() if not k.startswith("$")}
+        constants = {
+            item.target: item.value
+            for item in items
+            if isinstance(item, Assign) and len(item.defs) == 1 and item.target == item.defs[0] and item.value
+        }
         if self.has_main_guard or self.file.endswith("__main__.py") or any(isinstance(i, Call) for i in walk(items)):
             fid = f"{self.file}::<main>"
             self.functions[fid] = Function(
@@ -249,6 +261,7 @@ class _ModuleExtractor:
             classes=self.classes,
             has_main_guard=self.has_main_guard,
             globals=module_globals,
+            constants=constants,
         )
 
     def _scan_nested(self, node: Node) -> None:
@@ -367,6 +380,7 @@ class _Body:
         self.self_name = self_name
         self.module_level = module_level
         self.temps = 0
+        self.spans: list[tuple[int, int, str]] = []  # (start, end, temporary) for nested calls
         self.hints: dict[str, list[Hint]] = {}
         self.imports: list[Import] = []
         for p in params:
@@ -374,6 +388,21 @@ class _Body:
                 self.hint(p.name, ("ann", p.annotation))
 
     # bookkeeping
+
+    def src(self, node: Node | None) -> str:
+        """Full source of ``node`` with nested calls replaced by their temporaries."""
+        if node is None:
+            return ""
+        start, end = node.start_byte, node.end_byte
+        source = self.mod.source
+        out, pos = [], start
+        for s, e, name in sorted((sp for sp in self.spans if sp[0] >= start and sp[1] <= end), key=lambda sp: (sp[0], -sp[1])):
+            if s < pos:
+                continue  # inside a call that was already replaced
+            out += [source[pos:s], name.encode()]
+            pos = e
+        out.append(source[pos:end])
+        return b"".join(out).decode("utf-8", "replace")
 
     def temp(self) -> str:
         self.temps += 1
@@ -444,9 +473,10 @@ class _Body:
             return self.block(node.child_by_field_name("consequence"))
         cond = node.child_by_field_name("condition")
         items, uses = self.expr(cond)
+        test = self.src(cond)
         then = self.block(node.child_by_field_name("consequence"))
         orelse = self._alternatives(node.children_by_field_name("alternative"))
-        return items + [If(_short(_text(cond)), uses, then, orelse, _line(node), _col(node))]
+        return items + [If(_short(_text(cond)), uses, then, orelse, _line(node), _col(node), test)]
 
     def _alternatives(self, alts: list[Node]) -> list[Item]:
         if not alts:
@@ -456,27 +486,31 @@ class _Body:
             return self.block(first.child_by_field_name("body"))
         cond = first.child_by_field_name("condition")
         items, uses = self.expr(cond)
+        test = self.src(cond)
         then = self.block(first.child_by_field_name("consequence"))
-        return items + [If(_short(_text(cond)), uses, then, self._alternatives(rest), _line(first), _col(first))]
+        return items + [If(_short(_text(cond)), uses, then, self._alternatives(rest), _line(first), _col(first), test)]
 
     def _st_for_statement(self, node: Node) -> list[Item]:
         left = node.child_by_field_name("left")
         right = node.child_by_field_name("right")
         items, uses = self.expr(right)
+        target, source = self.src(left), self.src(right)
         defs = self.targets(left)[0]
         body = self.block(node.child_by_field_name("body"))
         alt = node.child_by_field_name("alternative")
         orelse = self.block(alt.child_by_field_name("body")) if alt is not None else []
         header = _short(f"for {_text(left)} in {_text(right)}")
-        return items + [Loop("for", header, defs, uses, body, orelse, _line(node), _col(node))]
+        return items + [Loop("for", header, defs, uses, body, orelse, _line(node), _col(node), target=target, iter=source)]
 
     def _st_while_statement(self, node: Node) -> list[Item]:
         cond = node.child_by_field_name("condition")
         items, uses = self.expr(cond)
+        test = self.src(cond)
         body = items + self.block(node.child_by_field_name("body"))
         alt = node.child_by_field_name("alternative")
         orelse = self.block(alt.child_by_field_name("body")) if alt is not None else []
-        return [Loop("while", _short(f"while {_text(cond)}"), [], uses, body, orelse, _line(node), _col(node))]
+        header = _short(f"while {_text(cond)}")
+        return [Loop("while", header, [], uses, body, orelse, _line(node), _col(node), test=test)]
 
     def _st_try_statement(self, node: Node) -> list[Item]:
         body = self.block(node.child_by_field_name("body"))
@@ -524,7 +558,7 @@ class _Body:
                     items += self.expr(expr_node, defs=defs)[0]
                 else:
                     more, uses = self.expr(expr_node)
-                    items += more + [Assign(defs, uses, _line(with_item))]
+                    items += more + [Assign(defs, uses, _line(with_item), self.src(target), self.src(expr_node))]
             else:
                 items += self.expr(value, defs=[])[0]
         return items + self.block(node.child_by_field_name("body"))
@@ -552,14 +586,15 @@ class _Body:
             body = guard_items + self.block(clause.child_by_field_name("consequence"))
             cases.append(Case(_short(pattern), body, _line(clause), _col(clause)))
         subject_text = ", ".join(_text(s) for s in subjects)
-        return items + [Match(_short(subject_text), _dedupe(uses), cases, _line(node), _col(node))]
+        subject_expr = ", ".join(self.src(s) for s in subjects)
+        return items + [Match(_short(subject_text), _dedupe(uses), cases, _line(node), _col(node), subject_expr)]
 
     def _st_return_statement(self, node: Node) -> list[Item]:
         values = _named(node)
         if not values:
             return [Return("", [], _line(node), col=_col(node))]
         items, uses = self.expr(values[0])
-        return items + [Return(_short(_text(values[0])), uses, _line(node), col=_col(node))]
+        return items + [Return(_short(_text(values[0])), uses, _line(node), col=_col(node), expr=self.src(values[0]))]
 
     def _st_raise_statement(self, node: Node) -> list[Item]:
         cause = node.child_by_field_name("cause")
@@ -574,7 +609,8 @@ class _Body:
         if not values:
             return [Return("", [], _line(node), kind="yield", col=_col(node))]
         items, uses = self.expr(values[0])
-        return items + [Return(_short(_text(values[0])), uses, _line(node), kind="yield", col=_col(node))]
+        expr = self.src(values[0])
+        return items + [Return(_short(_text(values[0])), uses, _line(node), kind="yield", col=_col(node), expr=expr)]
 
     # assignments
 
@@ -590,8 +626,9 @@ class _Body:
             return []
         if right.type == "assignment":  # a = b = value
             items = self.assignment(right)
-            inner = self.targets(right.child_by_field_name("left"))[0]
-            return items + [Assign(defs, _dedupe(inner + target_uses), _line(node))]
+            inner_left = right.child_by_field_name("left")
+            inner = self.targets(inner_left)[0]
+            return items + [Assign(defs, _dedupe(inner + target_uses), _line(node), self.src(left), self.src(inner_left))]
         if simple and self._is_call(right):
             return self.expr(right, defs=defs)[0]
         items, uses = self.expr(right)
@@ -599,12 +636,16 @@ class _Body:
             for hint in self.hints.get(_text(right), []):
                 for name in defs:
                     self.hint(name, hint)
-        return items + [Assign(defs, _dedupe(uses + target_uses), _line(node))]
+        return items + [Assign(defs, _dedupe(uses + target_uses), _line(node), self.src(left), self.src(right))]
 
     def augmented(self, node: Node) -> list[Item]:
-        defs, target_uses, _ = self.targets(node.child_by_field_name("left"))
-        items, uses = self.expr(node.child_by_field_name("right"))
-        return items + [Assign(defs, _dedupe(defs + target_uses + uses), _line(node))]
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        defs, target_uses, _ = self.targets(left)
+        items, uses = self.expr(right)
+        operator = _text(node.child_by_field_name("operator"))[:-1] or "+"
+        value = f"{self.src(left)} {operator} ({self.src(right)})"
+        return items + [Assign(defs, _dedupe(defs + target_uses + uses), _line(node), self.src(left), value)]
 
     def targets(self, node: Node | None) -> tuple[list[str], list[str], bool]:
         """Names written by an assignment target, extra names it reads, and
@@ -671,7 +712,10 @@ class _Body:
         if kind == "await":
             inner = _named(node)
             if inner and inner[0].type == "call":
-                return self.call(inner[0], defs, awaited=True)
+                items, out = self.call(inner[0], defs, awaited=True)
+                if defs is None and out:
+                    self.spans.append((node.start_byte, node.end_byte, f"__t{out[0][1:]}"))
+                return items, out
             return self.expr(inner[0]) if inner else ([], [])
         if kind == "identifier":
             return [], [_text(node)]
@@ -683,8 +727,9 @@ class _Body:
             return [], []
         if kind == "named_expression":
             name = _text(node.child_by_field_name("name"))
-            items, uses = self.expr(node.child_by_field_name("value"))
-            return items + [Assign([name], uses, _line(node))], [name]
+            value = node.child_by_field_name("value")
+            items, uses = self.expr(value)
+            return items + [Assign([name], uses, _line(node), name, self.src(value))], [name]
         if kind == "keyword_argument":
             return self.expr(node.child_by_field_name("value"))
         items: list[Item] = []
@@ -714,6 +759,7 @@ class _Body:
         fn = node.child_by_field_name("function")
         items: list[Item] = []
         receiver_uses: list[str] = []
+        receiver = ""
         callee = ""
         if fn is not None and fn.type == "identifier":
             callee = _text(fn)
@@ -723,11 +769,13 @@ class _Body:
             dotted = _dotted(obj) if obj is not None else None
             if dotted is not None:
                 callee = f"{dotted}.{attr}"
+                receiver = dotted
                 receiver_uses = self.expr(obj)[1]
             elif obj is not None:
                 more, used = self.expr(obj)
                 items += more
                 receiver_uses = used
+                receiver = self.src(obj)
                 if self._is_call(obj) and more and isinstance(more[-1], Call) and more[-1].defs:
                     callee = f"{more[-1].defs[0]}.{attr}"
         elif fn is not None:
@@ -740,23 +788,27 @@ class _Body:
         if arg_node is not None and arg_node.type == "generator_expression":
             more, used = self.comprehension(arg_node)
             items += more
-            args.append(Arg(_short(_text(arg_node)[1:-1]), used))
+            args.append(Arg(_short(_text(arg_node)[1:-1]), used, expr=self.src(arg_node)))
         elif arg_node is not None:
             for a in _named(arg_node):
                 if a.type == "keyword_argument":
                     value = a.child_by_field_name("value")
                     more, used = self.expr(value)
-                    args.append(Arg(_short(_text(value)), used, keyword=_text(a.child_by_field_name("name"))))
+                    keyword = _text(a.child_by_field_name("name"))
+                    args.append(Arg(_short(_text(value)), used, keyword=keyword, expr=self.src(value)))
                 elif a.type in ("list_splat", "dictionary_splat"):
                     inner = _named(a)[0] if _named(a) else None
                     more, used = self.expr(inner)
-                    args.append(Arg(_short(_text(inner)), used, star="*" if a.type == "list_splat" else "**"))
+                    star = "*" if a.type == "list_splat" else "**"
+                    args.append(Arg(_short(_text(inner)), used, star=star, expr=self.src(inner)))
                 else:
                     more, used = self.expr(a)
-                    args.append(Arg(_short(_text(a)), used))
+                    args.append(Arg(_short(_text(a)), used, expr=self.src(a)))
                 items += more
 
         out = [self.temp()] if defs is None else list(defs)
+        if defs is None:
+            self.spans.append((node.start_byte, node.end_byte, f"__t{out[0][1:]}"))
         if callee:
             for name in out:
                 self.hint(name, ("call", callee))
@@ -771,6 +823,7 @@ class _Body:
                 col=point[1],
                 text=_short(_text(node)),
                 awaited=awaited,
+                receiver=receiver,
             )
         )
         return items, out
@@ -781,6 +834,7 @@ class _Body:
         header: list[str] = []
         loop_defs: list[str] = []
         loop_uses: list[str] = []
+        target = source = ""
         first_for = True
         for clause in node.named_children:
             if clause.type == "for_in_clause":
@@ -790,6 +844,7 @@ class _Body:
                 if first_for:
                     before += more
                     first_for = False
+                    target, source = self.src(left), self.src(right)
                 else:
                     inside += more
                 loop_uses += used
@@ -802,6 +857,17 @@ class _Body:
         body = node.child_by_field_name("body")
         more, body_uses = self.expr(body)
         inside += more
-        loop = Loop("comprehension", _short(" ".join(header)), _dedupe(loop_defs), _dedupe(loop_uses), inside, [], _line(node), _col(node))
+        loop = Loop(
+            "comprehension",
+            _short(" ".join(header)),
+            _dedupe(loop_defs),
+            _dedupe(loop_uses),
+            inside,
+            [],
+            _line(node),
+            _col(node),
+            target=target,
+            iter=source,
+        )
         value_uses = [u for u in body_uses if u not in loop_defs] + loop_uses
         return before + [loop], _dedupe(value_uses)

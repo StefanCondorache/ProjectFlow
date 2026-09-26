@@ -16,6 +16,11 @@ def test_list_shows_entries_numbered_in_rank_order(capsys):
 
 def test_mermaid_for_an_entry_picked_by_number(capsys):
     assert main([SHOP, "--mermaid", "1"]) == 0
+    assert capsys.readouterr().out.startswith("flowchart LR")
+
+
+def test_mermaid_top_down(capsys):
+    assert main([SHOP, "--mermaid", "1", "--vertical"]) == 0
     assert capsys.readouterr().out.startswith("flowchart TD")
 
 

@@ -1,7 +1,7 @@
 // Flow graph -> ELK input, and ELK output -> absolutely positioned boxes.
 //
 // ELK's layered algorithm is the same family Mermaid uses, so the result reads
-// top-down like a Mermaid flowchart. Frames (loops, try blocks, opened steps)
+// like a Mermaid flowchart: left to right by default, or top down. Frames (loops, try blocks, opened steps)
 // are compound nodes; every edge is declared at the root and ELK routes it
 // across frame borders. Coordinates come back absolute ("ROOT" mode).
 import type { ElkExtendedEdge, ElkNode, LayoutOptions } from "elkjs/lib/elk-api";
@@ -42,9 +42,11 @@ export interface Placed extends Size {
   edges: PlacedEdge[];
 }
 
+/** ELK's direction: "RIGHT" reads left to right, "DOWN" top down. */
+export type Direction = "RIGHT" | "DOWN";
+
 const ROOT_OPTIONS: LayoutOptions = {
   "elk.algorithm": "layered",
-  "elk.direction": "DOWN",
   "elk.hierarchyHandling": "INCLUDE_CHILDREN",
   "elk.edgeRouting": "ORTHOGONAL",
   "elk.json.shapeCoords": "ROOT",
@@ -70,8 +72,13 @@ function frameOptions(headerWidth: number): LayoutOptions {
   };
 }
 
-export function toElk(graph: FlowGraph, sizing: Sizing): ElkNode {
-  const root: ElkNode = { id: "__root", layoutOptions: ROOT_OPTIONS, children: [], edges: [] };
+export function toElk(graph: FlowGraph, sizing: Sizing, direction: Direction = "RIGHT"): ElkNode {
+  const root: ElkNode = {
+    id: "__root",
+    layoutOptions: { ...ROOT_OPTIONS, "elk.direction": direction },
+    children: [],
+    edges: [],
+  };
   const elkNodes = new Map<string, ElkNode>();
   for (const node of graph.nodes) {
     elkNodes.set(

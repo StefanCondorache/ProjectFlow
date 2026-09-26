@@ -6,8 +6,11 @@ It binds to 127.0.0.1 and only ever reads the analysed project.
     GET /api/flow?root=&expand=&depth=&start=  diagram of a function
     GET /api/trail?root=&at=&var=&view=      one piece of data: its journey (functions
                                              by file) or, with view=steps, every step
-    GET /api/mermaid?(as flow or trail)      the same diagram as Mermaid text
+    GET /api/mermaid?(as flow or trail)&dir=  the same diagram as Mermaid text (dir: LR or TD)
     GET /api/source?file=&start=&end=        lines of an analysed source file
+    GET /api/search?q=                       functions whose name matches, best first
+    GET /api/simulate?root=&expand=&start=&choices=node=yes,...
+                                             walk the diagram with its data, frame by frame
 """
 
 from __future__ import annotations
@@ -22,11 +25,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from flowmap.dataflow import trace
-from flowmap.flow import Graph, build_flow
+from flowmap.flow import Graph, build_flow, display_name
 from flowmap.journey import build_journey
 from flowmap.ir import Call, walk
 from flowmap.mermaid import to_mermaid
 from flowmap.project import Project
+from flowmap.simulate import simulate
 
 WEB_DIR = Path(__file__).parent / "web"
 _TYPES = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml"}
@@ -92,6 +96,8 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/trail": self._flow,
             "/api/mermaid": self._mermaid,
             "/api/source": self._source,
+            "/api/simulate": self._simulate,
+            "/api/search": self._search,
         }
         try:
             route = routes.get(url.path)
@@ -147,7 +153,43 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(body)
 
     def _mermaid(self, query: dict) -> None:
-        self._send(200, "text/plain; charset=utf-8", to_mermaid(self._graph(query)[0]).encode())
+        text = to_mermaid(self._graph(query)[0], direction=query.get("dir", "LR"))
+        self._send(200, "text/plain; charset=utf-8", text.encode())
+
+    def _search(self, query: dict) -> None:
+        needle = query.get("q", "").strip().lower()
+        if not needle:
+            self._json([])
+            return
+        ranked = []
+        for fn in self.project.functions.values():
+            if fn.name == "<main>":
+                continue
+            name, qualname = fn.name.lower(), fn.qualname.lower()
+            if name == needle:
+                rank = 0
+            elif name.startswith(needle):
+                rank = 1
+            elif needle in qualname:
+                rank = 2
+            else:
+                continue
+            ranked.append((rank, len(fn.qualname), fn.file, fn.qualname, fn))
+        ranked.sort(key=lambda r: r[:4])
+        hits = [
+            {"id": fn.id, "label": display_name(self.project, fn), "file": fn.file, "line": fn.line, "doc": fn.doc}
+            for *_, fn in ranked[:30]
+        ]
+        self._json(hits)
+
+    def _simulate(self, query: dict) -> None:
+        root = query.get("root", "")
+        if root not in self.project.functions:
+            raise NotFound(f"unknown function {root!r}")
+        expanded = {part for part in query.get("expand", "").split(",") if part}
+        choices = dict(part.rsplit("=", 1) for part in query.get("choices", "").split(",") if "=" in part)
+        sim = simulate(self.project, root, expanded=expanded, start_label=query.get("start") or None, choices=choices)
+        self._json({"status": sim.status, "choice": sim.choice, "frames": [asdict(f) for f in sim.frames]})
 
     def _source(self, query: dict) -> None:
         file = query.get("file", "")

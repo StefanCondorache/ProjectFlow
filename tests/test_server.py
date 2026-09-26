@@ -79,7 +79,9 @@ def test_source_is_limited_to_analysed_files(base):
 def test_mermaid_export(base):
     kind, body = get(f"{base}/api/mermaid?" + urlencode({"root": WORKER, "depth": "1"}))
     assert kind == "text/plain"
-    assert body.decode().startswith("flowchart TD") and "subgraph" in body.decode()
+    assert body.decode().startswith("flowchart LR") and "subgraph" in body.decode()
+    vertical = get(f"{base}/api/mermaid?" + urlencode({"root": WORKER, "dir": "TD"}))[1].decode()
+    assert vertical.startswith("flowchart TD")
 
 
 def test_viewer_files_are_served_and_contained(base):
@@ -132,3 +134,28 @@ def test_mermaid_export_of_a_trail(base):
     assert 'subgraph n1["parse · src/shop/cli.py"]' in body.decode()  # opened only on the trail
     journey = get(f"{base}/api/mermaid?" + urlencode({**query, "view": "journey"}))[1].decode()
     assert '["src/shop/payments/gateway.py"]' in journey
+
+
+def test_simulation_walks_the_diagram(base):
+    data = get_json(f"{base}/api/simulate?" + urlencode({"root": "src/shop/cli.py::main"}))
+    assert data["status"] == "done"
+    first = data["frames"][0]
+    assert set(first) == {"node", "edge", "hop", "note", "stack", "changes"}
+    assert first["node"] == "s" and data["frames"][-1]["node"] == "e"
+
+
+def test_simulation_asks_at_unknown_decisions_and_takes_answers(base):
+    root = "src/shop/orders.py::OrderService.validate"
+    decision = next(n["id"] for n in get_json(f"{base}/api/flow?" + urlencode({"root": root}))["nodes"] if n["kind"] == "decision")
+    asked = get_json(f"{base}/api/simulate?" + urlencode({"root": root}))
+    assert asked["status"] == "choose" and asked["choice"]["node"] == decision
+    answered = get_json(f"{base}/api/simulate?" + urlencode({"root": root, "choices": f"{decision}=yes"}))
+    assert answered["status"] == "raised"
+
+
+def test_search_finds_functions_by_name(base):
+    hits = get_json(f"{base}/api/search?q=save")
+    assert [h["label"] for h in hits][:2] == ["Store.save", "AuditStore.save"]  # exact name, shortest first
+    assert {"id", "label", "file", "line", "doc"} <= hits[0].keys()
+    assert "src/shop/util.py::slugify" in [h["id"] for h in get_json(f"{base}/api/search?q=SLUG")]
+    assert get_json(f"{base}/api/search?q=") == []
