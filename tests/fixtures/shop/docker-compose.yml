@@ -1,0 +1,10 @@
+services:
+  api:
+    build: .
+    command: ["-m", "shop", "--config", "api.json"]
+  report:
+    build: .
+    command: python scripts/report.py --daily
+  worker:
+    image: shop:latest
+    entrypoint: ["bash", "run.sh"]

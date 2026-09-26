@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flowmap"
+version = "0.1.0"
+description = "Turn a code folder into Mermaid-style start-to-end flow diagrams of its functions, files and data."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+flowmap = "flowmap.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+flowmap = ["web/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# fixture projects contain their own tests; they are data, not our tests
+norecursedirs = [".*", "build", "dist", "node_modules", "*.egg", "venv", "fixtures"]
+# keep pytest's temporary folders inside the repo
+addopts = "--basetemp=.pytest_tmp"
