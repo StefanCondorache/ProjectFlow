@@ -64,6 +64,7 @@ class Call:
     external: str | None = None  # dotted name of an outside callable
     io: tuple[str, str] | None = None  # (channel, direction), e.g. ("file", "in")
     receiver: str = ""  # source of the object a method is called on
+    method: str = ""  # the method's name, for ``receiver.method(...)`` calls
 
 
 @dataclass
@@ -99,6 +100,7 @@ class Loop:
     target: str = ""  # source of the loop variable(s)
     iter: str = ""  # source of what a for loop runs over
     test: str = ""  # source of a while loop's condition
+    head: int = 0  # leading body items that compute a while loop's condition
 
 
 @dataclass
@@ -143,7 +145,7 @@ class Return:
     value: str
     uses: list[str]
     line: int
-    kind: str = "return"  # return | yield
+    kind: str = "return"  # return | yield | yield from
     col: int = 0
     expr: str = ""  # full source of the value
 
@@ -154,9 +156,22 @@ class Raise:
     uses: list[str]
     line: int
     col: int = 0
+    expr: str = ""  # full source of what is raised
 
 
-Item = Union[Call, Assign, If, Loop, Try, Match, Return, Raise]
+@dataclass
+class Break:
+    line: int
+    col: int = 0
+
+
+@dataclass
+class Continue:
+    line: int
+    col: int = 0
+
+
+Item = Union[Call, Assign, If, Loop, Try, Match, Return, Raise, Break, Continue]
 
 
 @dataclass
@@ -197,6 +212,7 @@ class ClassDef:
     methods: dict[str, str]  # method name -> function id
     fields: dict[str, list[Hint]]
     doc: str | None
+    defaults: dict[str, str] = field(default_factory=dict)  # class-level name -> source of its value
 
 
 @dataclass
@@ -210,6 +226,14 @@ class Module:
     has_main_guard: bool
     globals: dict[str, list[Hint]] = field(default_factory=dict)
     constants: dict[str, str] = field(default_factory=dict)  # module-level name -> source of its value
+    guard: tuple[int, int] | None = None  # first and last line of ``if __name__ == "__main__":``
+
+
+def self_name(fn: Function) -> str | None:
+    """The name a method calls its own object by (``self``), if it has one."""
+    if fn.cls and fn.params and "staticmethod" not in fn.decorators:
+        return fn.params[0].name
+    return None
 
 
 def child_blocks(item: Item) -> list[list[Item]]:

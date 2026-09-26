@@ -20,7 +20,7 @@ class Adapter:
     language: str
     extensions: tuple[str, ...]
     extract: Callable[[str, bytes], Module]
-    link: Callable[[Path, dict[str, Module]], None]
+    link: Callable[[Path, dict[str, Module]], object]  # returns the language's type resolver
     entries: Callable[[Path, dict[str, Module], list[Command]], list[Entry]]
 
 

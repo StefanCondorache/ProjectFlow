@@ -55,8 +55,12 @@ class _Scope:
     fn: Function | None
 
 
-def link_python(root: Path, modules: dict[str, Module]) -> None:
-    _Linker(root, modules).link()
+def link_python(root: Path, modules: dict[str, Module]) -> _Linker:
+    """Resolve every call; the linker stays available to answer type questions
+    later (``class_of``, ``lineage``)."""
+    linker = _Linker(root, modules)
+    linker.link()
+    return linker
 
 
 def _binds(imp: Import) -> str:
@@ -490,6 +494,30 @@ class _Linker:
             if method:
                 return method
         return None
+
+    def class_of(self, file: str, annotation: str) -> str | None:
+        """The project class an annotation written in ``file`` stands for."""
+        ref = self.annotation_ref(_Scope(file, None), annotation, 0)
+        return ref.key if ref is not None and ref.kind == "instance" else None
+
+    def lineage(self, cid: str) -> list[str]:
+        """Names of a class and of everything it derives from: its project
+        classes in MRO order, then outside bases with their own ancestors
+        when they are builtins (so ``except LookupError`` can match)."""
+        names = [self.classes[c].name for c in self.mro(cid)]
+        for c in self.mro(cid):
+            for base in self.bases(c):
+                if base.kind not in ("builtin", "external"):
+                    continue
+                outside = getattr(builtins, base.key, None) if base.kind == "builtin" else None
+                if isinstance(outside, type):
+                    found = [k.__name__ for k in outside.__mro__ if k is not object]
+                else:
+                    found = [base.key.rsplit(".", 1)[-1]]
+                    if found[0].endswith(("Error", "Exception", "Warning")):
+                        found += ["Exception", "BaseException"]
+                names += [n for n in found if n not in names]
+        return names
 
     def external_base(self, cid: str) -> str | None:
         for c in self.mro(cid):

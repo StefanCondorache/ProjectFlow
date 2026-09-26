@@ -14,16 +14,66 @@ temporaries: ``__t1`` is looked up as ``$1``.
 from __future__ import annotations
 
 import ast
+import base64
 import builtins
+import collections
 import copy
+import datetime
+import decimal
+import fractions
+import functools
+import json
+import math
 import operator
+import posixpath
+import re
+import statistics
+import textwrap
 from collections.abc import Callable
+from pathlib import PurePath, PurePosixPath
 
-from flowmap.values import MISSING, Obj, Unknown
+from flowmap.values import MISSING, Handle, Obj, Parser, Unknown
 
 NOT_PURE = object()  # returned for calls the simulation must not evaluate
-MAX_LEN = 10_000  # longest string or list the simulation will build
-MAX_LOOP = 1_000
+MAX_LEN = 200_000  # longest string or list the simulation will build
+MAX_LOOP = 200_000
+
+# In-memory types whose attributes and methods have no effect outside the value.
+SAFE_TYPES = (
+    datetime.date,
+    datetime.time,
+    datetime.timedelta,
+    decimal.Decimal,
+    fractions.Fraction,
+    PurePath,
+    collections.Counter,
+    collections.OrderedDict,
+    collections.defaultdict,
+    collections.deque,
+    re.Match,
+)
+BUILTIN_TYPES = {t.__name__: t for t in (int, float, str, bool, list, dict, tuple, set, frozenset, bytes)}
+_STAND_INS = (Obj, Handle, Parser)
+
+
+class EvalError(Exception):
+    """What the program itself would raise here: a real error on real values.
+    ``bases`` names the classes the error's class derives from."""
+
+    def __init__(self, type_name: str, message: str, bases: tuple[str, ...] = ()):
+        super().__init__(f"{type_name}: {message}")
+        self.type_name = type_name
+        self.message = message
+        self.bases = bases
+
+
+def lineage_of(kind: type) -> tuple[str, ...]:
+    return tuple(k.__name__ for k in kind.__mro__[1:] if k is not object)
+
+
+def _raised(err: Exception) -> EvalError:
+    message = repr(err.args[0]) if isinstance(err, KeyError) and err.args else str(err)
+    return EvalError(type(err).__name__, message, lineage_of(type(err)))
 
 Lookup = Callable[[str], object]
 
@@ -56,7 +106,7 @@ _COMPARE = {
 
 PURE_BUILTINS = {
     "len", "str", "int", "float", "bool", "abs", "round", "min", "max", "sum", "sorted", "list",
-    "tuple", "dict", "set", "repr", "any", "all", "reversed", "enumerate", "zip", "range",
+    "tuple", "dict", "set", "repr", "any", "all", "reversed", "enumerate", "zip", "range", "isinstance",
 }
 # Builtins that only need the shape of their argument, not every element.
 _SHAPE_ONLY = {"len", "list", "tuple", "dict", "set", "reversed", "enumerate", "zip"}
@@ -76,6 +126,9 @@ MUTATING_METHODS = {
     dict: {"update", "setdefault", "pop", "clear", "popitem"},
     set: {"add", "update", "discard", "remove", "clear"},
 }
+
+
+_CLOCK = {"now", "today", "utcnow"}  # the time of the simulation is not the time of a run
 
 
 class _Opaque(Exception):
@@ -103,15 +156,49 @@ def _size_ok(value) -> bool:
     return True
 
 
+@functools.lru_cache(maxsize=4096)
+def parse_expression(source: str) -> ast.expr | None:
+    """Parsed once, evaluated many times (a loop runs the same code each round).
+    Callers must not change the tree."""
+    try:
+        return ast.parse(source, mode="eval").body
+    except SyntaxError:
+        return None
+
+
 def evaluate(source: str, lookup: Lookup) -> object:
     source = source.strip()
     if not source:
         return Unknown("?")
-    try:
-        tree = ast.parse(source, mode="eval")
-    except SyntaxError:
+    tree = parse_expression(source)
+    if tree is None:
         return Unknown(source)
-    return _Evaluator(lookup).value(tree.body)
+    return _Evaluator(lookup).value(tree)
+
+
+def render(source: str, lookup: Lookup) -> str | None:
+    """An f-string as far as it can be known, for messages: the parts only a
+    run would know read like the code, in ‹›. None when not an f-string."""
+    tree = parse_expression(source.strip()) if source else None
+    if not isinstance(tree, ast.JoinedStr):
+        return None
+    evaluator = _Evaluator(lookup)
+    parts = []
+    for part in tree.values:
+        if isinstance(part, ast.Constant):
+            parts.append(str(part.value))
+            continue
+        try:
+            value = evaluator.known(part.value)
+            if not is_known(value):
+                raise _Opaque
+            if part.conversion == ord("r"):
+                value = repr(value)
+            spec = evaluator.known(part.format_spec) if part.format_spec is not None else ""
+            parts.append(format(value, spec))
+        except Exception:  # only for display: whatever fails reads like the code
+            parts.append(f"‹{evaluator.origin(part.value)}›")
+    return "".join(parts)
 
 
 class _Evaluator:
@@ -139,8 +226,10 @@ class _Evaluator:
     def value(self, node: ast.AST) -> object:
         try:
             result = self.eval(node)
-        except (_Opaque, ArithmeticError, TypeError, ValueError, KeyError, IndexError, AttributeError, RecursionError):
+        except (_Opaque, RecursionError):
             return Unknown(self.origin(node))
+        except (ArithmeticError, TypeError, ValueError, KeyError, IndexError, AttributeError) as err:
+            raise _raised(err) from None  # real values, real error
         if not _size_ok(result):
             return Unknown(self.origin(node))
         return result
@@ -149,8 +238,8 @@ class _Evaluator:
 
     def known(self, node: ast.AST) -> object:
         value = self.eval(node)
-        if isinstance(value, Unknown):
-            raise _Opaque
+        if isinstance(value, (Unknown, *_STAND_INS)):
+            raise _Opaque  # an operator on a project object runs its own code: not modelled
         return value
 
     def eval(self, node: ast.AST) -> object:
@@ -169,7 +258,7 @@ class _Evaluator:
         name = f"${node.id[3:]}" if node.id.startswith("__t") and node.id[3:].isdigit() else node.id
         value = self.lookup(name)
         if value is MISSING:
-            return Unknown(node.id)
+            return BUILTIN_TYPES.get(node.id, Unknown(node.id))
         return value
 
     def _List(self, node: ast.List):
@@ -248,7 +337,7 @@ class _Evaluator:
             if isinstance(op, (ast.Is, ast.IsNot)) and (isinstance(left, Obj) or isinstance(right, Obj)):
                 result = (left is right) if isinstance(op, ast.Is) else (left is not right)
             else:
-                if isinstance(left, Unknown) or isinstance(right, Unknown):
+                if isinstance(left, (Unknown, *_STAND_INS)) or isinstance(right, (Unknown, *_STAND_INS)):
                     raise _Opaque
                 result = _COMPARE[type(op)](left, right)
             if not result:
@@ -268,7 +357,7 @@ class _Evaluator:
             raise _Opaque
         key = self.known(node.slice)
         if isinstance(container, Unknown):
-            if key in container.known:
+            if hashable(key) and key in container.known:
                 return container.known[key]
             raise _Opaque
         if isinstance(container, (dict, list, tuple, str)):
@@ -276,11 +365,20 @@ class _Evaluator:
         raise _Opaque
 
     def _Attribute(self, node: ast.Attribute):
+        dotted = _dotted(node)
+        if dotted is not None:  # the caller may know a whole name, like os.environ
+            whole = self.lookup(dotted)
+            if whole is not MISSING:
+                return whole
         base = self.eval(node.value)
         if isinstance(base, Obj) and node.attr in base.fields:
             return base.fields[node.attr]
         if isinstance(base, Unknown) and node.attr in base.known:
             return base.known[node.attr]
+        if isinstance(base, SAFE_TYPES) and not node.attr.startswith("_"):
+            value = getattr(base, node.attr)
+            if not callable(value):
+                return value
         raise _Opaque
 
     def _JoinedStr(self, node: ast.JoinedStr):
@@ -342,10 +440,30 @@ class _Evaluator:
         return dict(self._comprehension(node, lambda inner: (inner.known(node.key), inner.value(node.value))))
 
 
+def hashable(value) -> bool:
+    try:
+        hash(value)
+    except TypeError:
+        return False
+    return True
+
+
+def _dotted(node: ast.expr) -> str | None:
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    return ".".join([node.id, *reversed(parts)])
+
+
 def _bind_target(target: ast.expr, value) -> dict:
     if isinstance(target, ast.Name):
         return {target.id: value}
     if isinstance(target, (ast.Tuple, ast.List)):
+        if isinstance(value, (Unknown, *_STAND_INS)):
+            raise _Opaque
         values = list(value)
         if len(values) != len(target.elts):
             raise _Opaque
@@ -359,59 +477,116 @@ def _bind_target(target: ast.expr, value) -> dict:
 # ── calls the simulation may evaluate ──────────────────────────────────────
 
 
+def _plain(values) -> bool:
+    return all(is_known(v) and not isinstance(v, _STAND_INS) for v in values)
+
+
 def call_builtin(name: str, args: list, kwargs: dict) -> object:
     """Result of a pure builtin, an Unknown when its inputs are not known, or
-    NOT_PURE when ``name`` is not one the simulation evaluates."""
+    NOT_PURE when ``name`` is not one the simulation evaluates. A real error on
+    real inputs raises EvalError."""
     if name not in PURE_BUILTINS:
         return NOT_PURE
     values = [*args, *kwargs.values()]
     shape_only = name in _SHAPE_ONLY
-    if any(isinstance(v, (Unknown, Obj)) for v in values) or (not shape_only and not all(is_known(v) for v in values)):
+    if any(isinstance(v, (Unknown, *_STAND_INS)) for v in values) or (not shape_only and not _plain(values)):
         return Unknown(f"{name}(…)")
     if name == "range":
         try:
             span = range(*args)
-        except (TypeError, ValueError):
-            return Unknown(f"{name}(…)")
+        except (TypeError, ValueError) as err:
+            raise _raised(err) from None
         return list(span) if len(span) <= MAX_LOOP else Unknown(f"range({len(span)} numbers)")
     try:
         result = getattr(builtins, name)(*args, **kwargs)
-    except Exception:
-        return Unknown(f"{name}(…)")
+    except (ArithmeticError, TypeError, ValueError, KeyError, IndexError) as err:
+        if not _plain(values):
+            return Unknown(f"{name}(…)")  # maybe caused by what is not known
+        raise _raised(err) from None
     if name in ("reversed", "enumerate", "zip"):
         result = list(result)
     return result if _size_ok(result) else Unknown(f"{name}(…)")
 
 
 def call_method(receiver, method: str, args: list, kwargs: dict) -> object:
-    """Result of a pure or mutating method on a known ``str``/``dict``/``list``/
-    ``set`` (mutating ones change ``receiver`` in place), or NOT_PURE."""
+    """Result of a method on a known in-memory value (mutating ones change
+    ``receiver`` in place), or NOT_PURE."""
     values = [*args, *kwargs.values()]
-    if isinstance(receiver, str) and method in STR_METHODS:
-        if not all(is_known(v) for v in values):
-            return Unknown(f"{receiver!r}.{method}(…)")
-        try:
-            result = getattr(receiver, method)(*args, **kwargs)
-        except Exception:
-            return Unknown(f"{receiver!r}.{method}(…)")
-        return result if _size_ok(result) else Unknown(f"{method}(…)")
-    for kind, methods in READ_METHODS.items():
-        if isinstance(receiver, kind) and method in methods:
-            try:
-                result = getattr(receiver, method)(*args, **kwargs)
-            except Exception:
-                return Unknown(f"{method}(…)")
-            if method in ("keys", "values", "items"):
-                result = list(result)
-            return result
-    for kind, methods in MUTATING_METHODS.items():
-        if isinstance(receiver, kind) and method in methods:
-            if method in ("sort",) and not is_known(receiver):
-                return None
-            try:
-                result = getattr(receiver, method)(*args, **kwargs)
-            except Exception:
-                return Unknown(f"{method}(…)")
-            return result if _size_ok(receiver) else Unknown(f"{method}(…)")
-    return NOT_PURE
+    allowed = False
+    if isinstance(receiver, str):
+        allowed = method in STR_METHODS
+    elif isinstance(receiver, SAFE_TYPES):
+        # PurePath lacks the disk methods of Path (read_text...): those are not evaluated here
+        allowed = not method.startswith("_") and method not in _CLOCK and callable(getattr(receiver, method, None))
+    else:
+        for kind, methods in (*READ_METHODS.items(), *MUTATING_METHODS.items()):
+            if isinstance(receiver, kind) and method in methods:
+                allowed = True
+    if not allowed:
+        return NOT_PURE
+    reads_only = isinstance(receiver, str) or any(isinstance(receiver, k) and method in m for k, m in READ_METHODS.items())
+    if reads_only and not _plain(values):
+        return Unknown(f"{method}(…)")
+    try:
+        result = getattr(receiver, method)(*args, **kwargs)
+    except (ArithmeticError, TypeError, ValueError, KeyError, IndexError, AttributeError) as err:
+        if not _plain([receiver, *values]):
+            return Unknown(f"{method}(…)")  # maybe caused by what is not known
+        raise _raised(err) from None
+    if method in ("keys", "values", "items") and not isinstance(receiver, str):
+        result = list(result)
+    return result if _size_ok(result) and _size_ok(receiver) else Unknown(f"{method}(…)")
 
+
+def _regex(function):
+    def guarded(pattern, string, *rest, **kwargs):
+        if len(str(pattern)) > 500 or len(str(string)) > 20_000:
+            raise TypeError("too large to evaluate")
+        return function(pattern, string, *rest, **kwargs)
+
+    return guarded
+
+
+LIBRARY: dict[str, Callable] = {
+    "json.loads": json.loads,
+    "json.dumps": json.dumps,
+    **{f"math.{n}": getattr(math, n) for n in dir(math) if not n.startswith("_") and callable(getattr(math, n))},
+    **{f"os.path.{n}": getattr(posixpath, n) for n in ("join", "basename", "dirname", "splitext", "split", "normpath", "isabs")},
+    **{f"statistics.{n}": getattr(statistics, n) for n in ("mean", "fmean", "median", "mode", "stdev", "pstdev", "variance", "pvariance")},
+    "datetime.date": datetime.date,
+    "datetime.datetime": datetime.datetime,
+    "datetime.time": datetime.time,
+    "datetime.timedelta": datetime.timedelta,
+    "datetime.datetime.strptime": datetime.datetime.strptime,
+    "datetime.datetime.fromisoformat": datetime.datetime.fromisoformat,
+    "datetime.date.fromisoformat": datetime.date.fromisoformat,
+    "decimal.Decimal": decimal.Decimal,
+    "fractions.Fraction": fractions.Fraction,
+    "collections.Counter": collections.Counter,
+    "collections.OrderedDict": collections.OrderedDict,
+    "collections.deque": collections.deque,
+    "copy.copy": copy.copy,
+    "copy.deepcopy": copy.deepcopy,
+    "textwrap.dedent": textwrap.dedent,
+    "textwrap.shorten": textwrap.shorten,
+    "base64.b64encode": base64.b64encode,
+    "base64.b64decode": base64.b64decode,
+    "pathlib.Path": PurePosixPath,
+    "pathlib.PurePath": PurePosixPath,
+    "pathlib.PurePosixPath": PurePosixPath,
+    **{f"re.{n}": _regex(getattr(re, n)) for n in ("match", "search", "fullmatch", "findall", "split", "sub")},
+}
+
+
+def call_library(name: str, args: list, kwargs: dict) -> object:
+    """Result of a pure library function on known inputs, or NOT_PURE."""
+    function = LIBRARY.get(name)
+    if function is None:
+        return NOT_PURE
+    if not _plain([*args, *kwargs.values()]):
+        return Unknown(f"{name}(…)")
+    try:
+        result = function(*args, **kwargs)
+    except (ArithmeticError, TypeError, ValueError, KeyError, IndexError, AttributeError, decimal.InvalidOperation) as err:
+        raise _raised(err) from None
+    return result if _size_ok(result) else Unknown(f"{name}(…)")

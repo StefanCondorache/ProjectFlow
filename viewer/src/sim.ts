@@ -2,10 +2,11 @@
 import type { Direction, Placed, Point } from "./layout";
 
 export type SimValue =
-  | { t: "val"; v: string | number | boolean | null }
+  | { t: "val"; v: string | number | boolean | null; type?: string }
   | { t: "dict"; v: Record<string, SimValue>; more?: number }
   | { t: "list"; v: SimValue[]; kind?: "tuple" | "set"; more?: number }
   | { t: "obj"; cls: string; v: Record<string, SimValue> }
+  | { t: "ref"; v: string }
   | { t: "?"; from: string; v?: Record<string, SimValue> };
 
 export interface SimScope {
@@ -21,6 +22,20 @@ export interface SimChanges {
   removed: string[];
 }
 
+/** Something the program writes, prints or logs: recorded, never done. */
+export interface SimOutput {
+  target: string;
+  how: string;
+  data: SimValue;
+}
+
+export interface SimError {
+  type: string;
+  message: string;
+  file: string;
+  line: number;
+}
+
 export interface SimFrame {
   node: string;
   edge: [string, string] | null;
@@ -28,18 +43,102 @@ export interface SimFrame {
   note: string;
   stack: SimScope[];
   changes: SimChanges;
+  outputs: SimOutput[];
+  error: SimError | null;
 }
 
 export interface SimChoice {
+  /** The node asking, plus "@round" per loop round when a loop asks again each time. */
   node: string;
   question: string;
   options: { label: string; value: string }[];
 }
 
 export interface Simulation {
-  status: "done" | "choose" | "raised" | "limit";
+  status: "done" | "choose" | "raised" | "limit" | "unreached";
   choice: SimChoice | null;
+  error: SimError | null;
+  /** The opened steps the frames refer to (more than asked for when every step is gone into). */
+  expanded: string[];
   frames: SimFrame[];
+}
+
+/** What a run is given, besides the answers to its questions. */
+export interface SimSetup {
+  /** Node the run starts at (null: the start of the diagram). */
+  at: string | null;
+  inputs: Record<string, unknown>;
+  env: Record<string, string | null>;
+  argv: string[] | null;
+  provided: Record<string, unknown>;
+  autoOpen: boolean;
+}
+
+export const NO_SETUP: SimSetup = { at: null, inputs: {}, env: {}, argv: null, provided: {}, autoOpen: false };
+
+/** What there is at a node for a run started there. */
+export interface Expects {
+  reached: boolean;
+  function?: string;
+  label?: string;
+  file?: string;
+  vars: Record<string, { value: SimValue; known: boolean; type: string | null; template: unknown }>;
+  env: string[];
+  argv: boolean;
+}
+
+/** A shown value back as JSON, to edit; undefined when it is not known. */
+export function plainOf(value: SimValue): unknown {
+  switch (value.t) {
+    case "val":
+      return value.v;
+    case "dict":
+    case "obj":
+      return Object.fromEntries(Object.entries(value.v).map(([k, v]) => [k, plainOf(v)]));
+    case "list":
+      return value.v.map(plainOf);
+    default:
+      return undefined;
+  }
+}
+
+/** A command line split like a shell would: quotes keep spaces. */
+export function splitArgs(text: string): string[] {
+  const out: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  let started = false;
+  for (const ch of text) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      started = true;
+    } else if (/\s/.test(ch)) {
+      if (started) out.push(current);
+      current = "";
+      started = false;
+    } else {
+      current += ch;
+      started = true;
+    }
+  }
+  if (started) out.push(current);
+  return out;
+}
+
+export function joinArgs(argv: string[]): string {
+  return argv.map((a) => (a === "" || /[\s"']/.test(a) ? JSON.stringify(a) : a)).join(" ");
+}
+
+/** What was typed: JSON when it parses, else the text itself. */
+export function readInput(text: string): { value: unknown; text: boolean } {
+  try {
+    return { value: JSON.parse(text), text: false };
+  } catch {
+    return { value: text, text: true };
+  }
 }
 
 const FRAMES = new Set(["group", "loop", "try", "handler", "file"]);

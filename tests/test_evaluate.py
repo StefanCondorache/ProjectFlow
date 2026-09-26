@@ -98,3 +98,87 @@ def test_diff_reports_added_changed_and_removed_paths():
     before = {"cfg": encode({"db": "x"}), "n": encode(1), "old": encode(2)}
     after = {"cfg": encode({"db": "y", "mode": "train"}), "n": encode(1), "new": encode(3)}
     assert diff(before, after) == {"added": ["cfg.mode", "new"], "changed": ["cfg.db"], "removed": ["old"]}
+
+
+# ── real values, real errors ──────────────────────────────────────────────
+
+
+def test_errors_on_real_values_are_the_programs_own_errors():
+    import pytest
+
+    from flowmap.lang.python.evaluate import EvalError
+
+    with pytest.raises(EvalError) as missing:
+        ev('rows["b"]', rows={"a": 1})
+    assert (missing.value.type_name, missing.value.message) == ("KeyError", "'b'")
+    with pytest.raises(EvalError) as index:
+        ev("values[5]", values=[1, 2])
+    assert (index.value.type_name, index.value.message) == ("IndexError", "list index out of range")
+    with pytest.raises(EvalError) as zero:
+        ev("1 / n", n=0)
+    assert zero.value.type_name == "ZeroDivisionError"
+    with pytest.raises(EvalError):
+        call_builtin("int", ["abc"], {})
+
+
+def test_what_the_simulation_cannot_see_is_never_an_error():
+    assert isinstance(ev('cfg["b"]', cfg=Unknown("load()")), Unknown)
+    assert isinstance(ev("store + 1", store=Obj("Store", {})), Unknown)  # its own __add__ would run
+    assert isinstance(ev("store.missing", store=Obj("Store", {})), Unknown)  # maybe a property
+
+
+def test_builtin_types_are_values():
+    assert ev("int") is int
+    assert ev("int", int=5) == 5  # a local of that name wins
+
+
+def test_values_of_everyday_types():
+    import datetime
+    from decimal import Decimal
+    from pathlib import PurePosixPath
+
+    from flowmap.lang.python.evaluate import call_library
+
+    day = datetime.date(2026, 1, 2)
+    assert ev("day.year", day=day) == 2026
+    assert call_method(day, "isoformat", [], {}) == "2026-01-02"
+    assert call_library("datetime.date.fromisoformat", ["2026-01-02"], {}) == day
+    assert call_library("decimal.Decimal", ["1.10"], {}) + Decimal("1") == Decimal("2.10")
+    assert call_library("pathlib.Path", ["/a/b.txt"], {}) == PurePosixPath("/a/b.txt")
+    assert call_method(PurePosixPath("/a/b.txt"), "with_suffix", [".json"], {}) == PurePosixPath("/a/b.json")
+    assert call_method(PurePosixPath("/a"), "read_text", [], {}) is NOT_PURE  # touches the disk: not here
+
+
+def test_pure_library_functions():
+    from flowmap.lang.python.evaluate import call_library
+
+    assert call_library("json.loads", ['{"a": [1]}'], {}) == {"a": [1]}
+    assert call_library("math.sqrt", [16], {}) == 4.0
+    assert call_library("os.path.join", ["a", "b.txt"], {}) == "a/b.txt"
+    assert call_library("statistics.mean", [[1, 2, 3]], {}) == 2
+    assert call_library("subprocess.run", [["rm", "-rf", "/"]], {}) is NOT_PURE
+    assert isinstance(call_library("math.sqrt", [Unknown("x")], {}), Unknown)
+
+
+def test_dotted_names_can_be_looked_up_whole():
+    assert ev("sys.argv[1:]", **{"sys.argv": ["prog", "--x"]}) == ["--x"]
+    assert ev('os.environ["HOME"]', **{"os.environ": Unknown("os.environ", {"HOME": "/h"})}) == "/h"
+    assert ev("cfg.db", cfg=Obj("Cfg", {"db": "x"})) == "x"
+
+
+def test_isinstance_on_plain_values():
+    assert call_builtin("isinstance", [{"a": 1}, dict], {}) is True
+    assert call_builtin("isinstance", [3, (str, bytes)], {}) is False
+
+
+def test_selecting_columns_of_an_unknown_table_is_not_an_error():
+    assert isinstance(ev('df[["a", "b"]]', df=Unknown("load()")), Unknown)
+    assert isinstance(ev('df[["a"]]', df=Unknown("load()", {"a": 1})), Unknown)
+
+
+def test_everyday_types_are_shown_with_a_plain_type_name():
+    import datetime
+    from pathlib import PurePosixPath
+
+    assert encode(PurePosixPath("/a")) == {"t": "val", "v": "/a", "type": "path"}
+    assert encode(datetime.date(2026, 1, 2)) == {"t": "val", "v": "2026-01-02", "type": "date"}

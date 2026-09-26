@@ -84,7 +84,9 @@ def build_flow(
     def should_open(node: Node, level: int) -> bool:
         if trail is not None:
             return node.id in trail.opened
-        return bool(node.detail.get("expandable")) and (node.id in expanded or level < depth)
+        # asked for by id: open even a step with nothing to draw inside (the
+        # simulation passes data through it); by depth: only those with content
+        return node.id in expanded or (bool(node.detail.get("expandable")) and level < depth)
 
     def add(fid: str, prefix: str, parent: str | None, path: frozenset[str], level: int) -> None:
         fragment = _Fragment(

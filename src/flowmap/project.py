@@ -18,6 +18,7 @@ class Project:
     functions: dict[str, Function]
     classes: dict[str, ClassDef]
     entries: list[Entry] = field(default_factory=list)
+    resolvers: dict[str, object] = field(default_factory=dict)  # language -> its linker, for type questions
 
     @property
     def name(self) -> str:
@@ -37,10 +38,11 @@ def load_project(root: str | Path) -> Project:
         modules[rel] = by_ext[Path(rel).suffix].extract(rel, source)
     commands = find_commands(root)
     candidates: list[Entry] = []
+    resolvers: dict[str, object] = {}
     for adapter in langs:
         own = {f: m for f, m in modules.items() if m.language == adapter.language}
-        adapter.link(root, own)
+        resolvers[adapter.language] = adapter.link(root, own)
         candidates += adapter.entries(root, own, commands)
     functions = {fid: fn for m in modules.values() for fid, fn in m.functions.items()}
     classes = {cid: c for m in modules.values() for cid, c in m.classes.items()}
-    return Project(root, modules, functions, classes, merge_entries(candidates, functions))
+    return Project(root, modules, functions, classes, merge_entries(candidates, functions), resolvers)

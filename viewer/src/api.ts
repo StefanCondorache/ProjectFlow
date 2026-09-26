@@ -1,4 +1,4 @@
-import type { Simulation } from "./sim";
+import type { Expects, SimSetup, Simulation } from "./sim";
 import type { FlowGraph, ProjectInfo, SourceLines } from "./types";
 
 export interface ViewState {
@@ -26,6 +26,15 @@ async function get<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok) {
+    const reason = await response.json().catch(() => null);
+    throw new Error(reason?.error ?? `${response.status} ${response.statusText}: ${path}`);
+  }
+  return response.json() as Promise<T>;
+}
+
 function flowQuery(view: ViewState): string {
   const params = new URLSearchParams({ root: view.root });
   if (view.start) params.set("start", view.start);
@@ -45,13 +54,21 @@ export const api = {
   flow: (view: ViewState) => get<FlowGraph>(`api/${view.at ? "trail" : "flow"}?${flowQuery(view)}`),
   source: (file: string, start: number, end: number) =>
     get<SourceLines>(`api/source?${new URLSearchParams({ file, start: String(start), end: String(end) })}`),
-  simulate: (view: ViewState, choices: Record<string, string>) => {
-    const params = new URLSearchParams({ root: view.root, expand: view.expanded.join(",") });
-    if (view.start) params.set("start", view.start);
-    const answered = Object.entries(choices).map(([node, value]) => `${node}=${value}`);
-    if (answered.length) params.set("choices", answered.join(","));
-    return get<Simulation>(`api/simulate?${params}`);
-  },
+  simulate: (view: ViewState, choices: Record<string, string>, setup: SimSetup) =>
+    post<Simulation>("api/simulate", {
+      root: view.root,
+      expand: view.expanded,
+      start: view.start ?? null,
+      choices,
+      inputs: setup.inputs,
+      env: setup.env,
+      argv: setup.argv,
+      provided: setup.provided,
+      start_at: setup.at,
+      auto_open: setup.autoOpen,
+    }),
+  expects: (view: ViewState, at: string) =>
+    get<Expects>(`api/expects?${new URLSearchParams({ root: view.root, expand: view.expanded.join(","), at })}`),
   mermaid: async (view: ViewState, dir: "LR" | "TD") => {
     const response = await fetch(`api/mermaid?${flowQuery(view)}&dir=${dir}`);
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);

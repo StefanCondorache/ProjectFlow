@@ -10,9 +10,11 @@ from tree_sitter import Language, Node, Parser
 from flowmap.ir import (
     Arg,
     Assign,
+    Break,
     Call,
     Case,
     ClassDef,
+    Continue,
     Function,
     Handler,
     Hint,
@@ -209,6 +211,7 @@ class _ModuleExtractor:
         self.functions: dict[str, Function] = {}
         self.classes: dict[str, ClassDef] = {}
         self.has_main_guard = False
+        self.guard: tuple[int, int] | None = None
 
     def run(self) -> Module:
         doc = _docstring(self.root)
@@ -224,6 +227,7 @@ class _ModuleExtractor:
             else:
                 if stmt.type == "if_statement" and _is_main_guard(stmt):
                     self.has_main_guard = True
+                    self.guard = (_line(stmt), stmt.end_point[0] + 1)
                 if stmt.type in ("if_statement", "try_statement", "with_statement"):
                     self._scan_nested(stmt)
                 executable.append(stmt)
@@ -262,6 +266,7 @@ class _ModuleExtractor:
             has_main_guard=self.has_main_guard,
             globals=module_globals,
             constants=constants,
+            guard=self.guard,
         )
 
     def _scan_nested(self, node: Node) -> None:
@@ -346,6 +351,9 @@ class _ModuleExtractor:
         left = node.child_by_field_name("left")
         if left is None or left.type != "identifier":
             return
+        value = node.child_by_field_name("right")
+        if value is not None:
+            cls.defaults[_text(left)] = _text(value)
         hints = cls.fields.setdefault(_text(left), [])
         ann = _annotation(node.child_by_field_name("type"))
         if ann:
@@ -495,7 +503,8 @@ class _Body:
         right = node.child_by_field_name("right")
         items, uses = self.expr(right)
         target, source = self.src(left), self.src(right)
-        defs = self.targets(left)[0]
+        defs, _, _, target_items = self.targets(left)
+        items += target_items
         body = self.block(node.child_by_field_name("body"))
         alt = node.child_by_field_name("alternative")
         orelse = self.block(alt.child_by_field_name("body")) if alt is not None else []
@@ -510,7 +519,7 @@ class _Body:
         alt = node.child_by_field_name("alternative")
         orelse = self.block(alt.child_by_field_name("body")) if alt is not None else []
         header = _short(f"while {_text(cond)}")
-        return [Loop("while", header, [], uses, body, orelse, _line(node), _col(node), test=test)]
+        return [Loop("while", header, [], uses, body, orelse, _line(node), _col(node), test=test, head=len(items))]
 
     def _st_try_statement(self, node: Node) -> list[Item]:
         body = self.block(node.child_by_field_name("body"))
@@ -553,7 +562,7 @@ class _Body:
                 expr_node = _named(value)[0]
                 alias = value.child_by_field_name("alias")
                 target = _named(alias)[0] if alias is not None and alias.type == "as_pattern_target" and _named(alias) else alias
-                defs = self.targets(target)[0] if target is not None else []
+                defs = self.names_in(target)
                 if self._is_call(expr_node):
                     items += self.expr(expr_node, defs=defs)[0]
                 else:
@@ -602,7 +611,13 @@ class _Body:
         if not values:
             return [Raise("", [], _line(node), _col(node))]
         items, uses = self.expr(values[0])
-        return items + [Raise(_short(_text(values[0])), uses, _line(node), _col(node))]
+        return items + [Raise(_short(_text(values[0])), uses, _line(node), _col(node), self.src(values[0]))]
+
+    def _st_break_statement(self, node: Node) -> list[Item]:
+        return [Break(_line(node), _col(node))]
+
+    def _st_continue_statement(self, node: Node) -> list[Item]:
+        return [Continue(_line(node), _col(node))]
 
     def yield_(self, node: Node) -> list[Item]:
         values = _named(node)
@@ -610,14 +625,15 @@ class _Body:
             return [Return("", [], _line(node), kind="yield", col=_col(node))]
         items, uses = self.expr(values[0])
         expr = self.src(values[0])
-        return items + [Return(_short(_text(values[0])), uses, _line(node), kind="yield", col=_col(node), expr=expr)]
+        kind = "yield from" if any(c.type == "from" for c in node.children) else "yield"
+        return items + [Return(_short(_text(values[0])), uses, _line(node), kind=kind, col=_col(node), expr=expr)]
 
     # assignments
 
     def assignment(self, node: Node) -> list[Item]:
         left = node.child_by_field_name("left")
         right = node.child_by_field_name("right")
-        defs, target_uses, simple = self.targets(left)
+        defs, target_uses, simple, target_items = self.targets(left)
         ann = _annotation(node.child_by_field_name("type"))
         if ann:
             for name in defs:
@@ -627,8 +643,8 @@ class _Body:
         if right.type == "assignment":  # a = b = value
             items = self.assignment(right)
             inner_left = right.child_by_field_name("left")
-            inner = self.targets(inner_left)[0]
-            return items + [Assign(defs, _dedupe(inner + target_uses), _line(node), self.src(left), self.src(inner_left))]
+            inner = self.names_in(inner_left)
+            return target_items + items + [Assign(defs, _dedupe(inner + target_uses), _line(node), self.src(left), self.src(inner_left))]
         if simple and self._is_call(right):
             return self.expr(right, defs=defs)[0]
         items, uses = self.expr(right)
@@ -636,53 +652,80 @@ class _Body:
             for hint in self.hints.get(_text(right), []):
                 for name in defs:
                     self.hint(name, hint)
-        return items + [Assign(defs, _dedupe(uses + target_uses), _line(node), self.src(left), self.src(right))]
+        return items + target_items + [Assign(defs, _dedupe(uses + target_uses), _line(node), self.src(left), self.src(right))]
 
     def augmented(self, node: Node) -> list[Item]:
         left = node.child_by_field_name("left")
         right = node.child_by_field_name("right")
-        defs, target_uses, _ = self.targets(left)
+        defs, target_uses, _, target_items = self.targets(left)
         items, uses = self.expr(right)
+        items = target_items + items
         operator = _text(node.child_by_field_name("operator"))[:-1] or "+"
         value = f"{self.src(left)} {operator} ({self.src(right)})"
         return items + [Assign(defs, _dedupe(defs + target_uses + uses), _line(node), self.src(left), value)]
 
-    def targets(self, node: Node | None) -> tuple[list[str], list[str], bool]:
-        """Names written by an assignment target, extra names it reads, and
-        whether every target is a plain name or ``self.<field>``."""
+    def targets(self, node: Node | None) -> tuple[list[str], list[str], bool, list[Item]]:
+        """Names written by an assignment target, extra names it reads,
+        whether every target is a plain name or ``self.<field>``, and the
+        calls inside it (``cache.setdefault(k, {})[j] = v``), which run first."""
         if node is None:
-            return [], [], False
+            return [], [], False, []
         kind = node.type
         if kind == "identifier":
-            return [_text(node)], [], True
+            return [_text(node)], [], True, []
         if kind == "attribute":
             obj = node.child_by_field_name("object")
             attr = _text(node.child_by_field_name("attribute"))
             if obj is not None and obj.type == "identifier" and _text(obj) == self.self_name:
-                return [f"{self.self_name}.{attr}"], [], True
+                return [f"{self.self_name}.{attr}"], [], True, []
             root = self._root_name(node)
-            uses = self.expr(obj)[1] if obj is not None else []
-            return ([root] if root else []), uses, False
+            items, uses = self.expr(obj) if obj is not None else ([], [])
+            return ([root] if root else []), uses, False, items
         if kind == "subscript":
             value = node.child_by_field_name("value")
             root = self._root_name(value) if value is not None else None
+            items: list[Item] = []
             uses: list[str] = []
             for child in _named(node):
-                uses += self.expr(child)[1]
-            return ([root] if root else []), uses, False
+                more, used = self.expr(child)
+                items += more
+                uses += used
+            return ([root] if root else []), uses, False, items
         if kind in ("pattern_list", "tuple_pattern", "list_pattern", "tuple", "list", "expression_list", "parenthesized_expression"):
             defs: list[str] = []
             uses = []
+            items = []
             simple = True
             for child in _named(node):
-                d, u, s = self.targets(child)
+                d, u, s, i = self.targets(child)
                 defs += d
                 uses += u
+                items += i
                 simple = simple and s
-            return defs, uses, simple
+            return defs, uses, simple, items
         if kind in ("list_splat_pattern", "list_splat"):
-            return self.targets(_named(node)[0]) if _named(node) else ([], [], False)
-        return [], [], False
+            return self.targets(_named(node)[0]) if _named(node) else ([], [], False, [])
+        return [], [], False, []
+
+    def names_in(self, node: Node | None) -> list[str]:
+        """The names ``targets`` reports as written, without extracting anything."""
+        if node is None:
+            return []
+        kind = node.type
+        if kind == "identifier":
+            return [_text(node)]
+        if kind == "attribute":
+            obj = node.child_by_field_name("object")
+            if obj is not None and obj.type == "identifier" and _text(obj) == self.self_name:
+                return [f"{self.self_name}.{_text(node.child_by_field_name('attribute'))}"]
+        if kind in ("attribute", "subscript"):
+            root = self._root_name(node)
+            return [root] if root else []
+        if kind in ("pattern_list", "tuple_pattern", "list_pattern", "tuple", "list", "expression_list", "parenthesized_expression"):
+            return [name for child in _named(node) for name in self.names_in(child)]
+        if kind in ("list_splat_pattern", "list_splat"):
+            return self.names_in(_named(node)[0]) if _named(node) else []
+        return []
 
     def _root_name(self, node: Node) -> str | None:
         while node is not None and node.type in ("attribute", "subscript"):
@@ -732,6 +775,10 @@ class _Body:
             return items + [Assign([name], uses, _line(node), name, self.src(value))], [name]
         if kind == "keyword_argument":
             return self.expr(node.child_by_field_name("value"))
+        if kind == "conditional_expression" and len(_named(node)) == 3:
+            return self.conditional(node)
+        if kind == "boolean_operator":
+            return self.short_circuit(node)
         items: list[Item] = []
         uses: list[str] = []
         for child in _named(node):
@@ -739,6 +786,28 @@ class _Body:
             items += more
             uses += used
         return items, _dedupe(uses)
+
+    def conditional(self, node: Node) -> tuple[list[Item], list[str]]:
+        """``a() if c else b()``: each call runs only on its own branch."""
+        then_node, test_node, else_node = _named(node)
+        items, uses = self.expr(test_node)
+        then_items, then_uses = self.expr(then_node)
+        else_items, else_uses = self.expr(else_node)
+        if then_items or else_items:
+            cond = _short(_text(test_node))
+            items.append(If(cond, uses, then_items, else_items, _line(node), _col(node), self.src(test_node)))
+        return items, _dedupe(uses + then_uses + else_uses)
+
+    def short_circuit(self, node: Node) -> tuple[list[Item], list[str]]:
+        """``a() or b()``: ``b()`` runs only when ``a()`` does not decide."""
+        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+        operator = node.child_by_field_name("operator")
+        items, uses = self.expr(left)
+        right_items, right_uses = self.expr(right)
+        if right_items:
+            then, orelse = (right_items, []) if operator is not None and operator.type == "and" else ([], right_items)
+            items.append(If(_short(_text(left)), uses, then, orelse, _line(node), _col(node), self.src(left)))
+        return items, _dedupe(uses + right_uses)
 
     def attribute(self, node: Node) -> tuple[list[Item], list[str]]:
         chain: list[str] = []
@@ -761,11 +830,12 @@ class _Body:
         receiver_uses: list[str] = []
         receiver = ""
         callee = ""
+        method = ""
         if fn is not None and fn.type == "identifier":
             callee = _text(fn)
         elif fn is not None and fn.type == "attribute":
             obj = fn.child_by_field_name("object")
-            attr = _text(fn.child_by_field_name("attribute"))
+            attr = method = _text(fn.child_by_field_name("attribute"))
             dotted = _dotted(obj) if obj is not None else None
             if dotted is not None:
                 callee = f"{dotted}.{attr}"
@@ -824,6 +894,7 @@ class _Body:
                 text=_short(_text(node)),
                 awaited=awaited,
                 receiver=receiver,
+                method=method,
             )
         )
         return items, out
@@ -848,7 +919,7 @@ class _Body:
                 else:
                     inside += more
                 loop_uses += used
-                loop_defs += self.targets(left)[0]
+                loop_defs += self.names_in(left)
                 header.append(f"for {_text(left)} in {_text(right)}")
             elif clause.type == "if_clause" and _named(clause):
                 cond = _named(clause)[0]

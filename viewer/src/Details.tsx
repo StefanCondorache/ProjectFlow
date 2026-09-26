@@ -31,8 +31,13 @@ interface Props {
   onToggle: (node: FlowNode) => void;
   onEnter: (functionId: string) => void;
   onFollow: (at: string, variable: string) => void;
+  /** Start a simulation at this node (absent: not offered). */
+  onSimulateFrom?: (node: FlowNode) => void;
   onClose: () => void;
 }
+
+// Boxes a simulation can start at: those the walk passes through.
+const STARTS = new Set(["start", "step", "io", "decision", "loop", "try", "handler", "raise", "group"]);
 
 interface Where {
   file: string;
@@ -66,7 +71,7 @@ function Chips({ values, onFollow }: { values: string[]; onFollow?: (value: stri
   );
 }
 
-export function Details({ node, following, onToggle, onEnter, onFollow, onClose }: Props) {
+export function Details({ node, following, onToggle, onEnter, onFollow, onSimulateFrom, onClose }: Props) {
   const d = node.detail;
   const where = sourceFor(node);
   const [source, setSource] = useState<SourceLines | null>(null);
@@ -185,6 +190,11 @@ export function Details({ node, following, onToggle, onEnter, onFollow, onClose 
         )}
       </dl>
       <div className="actions">
+        {onSimulateFrom && STARTS.has(node.kind) && (
+          <button className="primary" onClick={() => onSimulateFrom(node)} title="Send data through the diagram from this point on">
+            ▶ Simulate from here
+          </button>
+        )}
         {node.kind === "step" && d.expandable && !following && <button onClick={() => onToggle(node)}>Open here</button>}
         {node.kind === "group" && !following && <button onClick={() => onToggle(node)}>Close</button>}
         {d.target && <button onClick={() => onEnter(d.target!)}>Show on its own</button>}

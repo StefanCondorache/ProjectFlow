@@ -37,6 +37,13 @@ def get_json(url: str):
     return json.loads(body)
 
 
+def post_json(url: str, body: dict):
+    request = urllib.request.Request(url, json.dumps(body).encode(), {"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request) as response:
+        assert response.headers.get_content_type() == "application/json"
+        return json.loads(response.read())
+
+
 def status_of(url: str) -> int:
     try:
         urllib.request.urlopen(url)
@@ -140,7 +147,7 @@ def test_simulation_walks_the_diagram(base):
     data = get_json(f"{base}/api/simulate?" + urlencode({"root": "src/shop/cli.py::main"}))
     assert data["status"] == "done"
     first = data["frames"][0]
-    assert set(first) == {"node", "edge", "hop", "note", "stack", "changes"}
+    assert set(first) == {"node", "edge", "hop", "note", "stack", "changes", "outputs", "error"}
     assert first["node"] == "s" and data["frames"][-1]["node"] == "e"
 
 
@@ -159,3 +166,31 @@ def test_search_finds_functions_by_name(base):
     assert {"id", "label", "file", "line", "doc"} <= hits[0].keys()
     assert "src/shop/util.py::slugify" in [h["id"] for h in get_json(f"{base}/api/search?q=SLUG")]
     assert get_json(f"{base}/api/search?q=") == []
+
+
+def test_simulation_takes_real_data_in_a_post(base):
+    body = {"root": "src/shop/cli.py::main", "argv": ["--config", "cfg.json", "anna"], "env": {"SHOP_TOKEN": "t0k"}}
+    data = post_json(f"{base}/api/simulate", body)
+    args = next(f for f in data["frames"] if "args" in f["stack"][-1]["vars"])["stack"][-1]["vars"]["args"]
+    assert args["cls"] == "Namespace" and args["v"]["names"]["v"] == [{"t": "val", "v": "anna"}]
+    assert {"status", "choice", "error", "expanded", "frames"} <= data.keys()
+
+
+def test_simulation_can_start_anywhere_and_open_every_step(base):
+    root = "src/shop/cli.py::main"
+    step = next(n["id"] for n in get_json(f"{base}/api/flow?" + urlencode({"root": root}))["nodes"] if n["label"] == "load_config")
+    data = post_json(f"{base}/api/simulate", {"root": root, "start_at": step, "inputs": {"args": {"config": "x.json"}}, "auto_open": True})
+    assert data["frames"][0]["node"] == step and step in data["expanded"]
+
+
+def test_bad_simulation_requests_are_refused(base):
+    request = urllib.request.Request(f"{base}/api/simulate", b"{not json", {"Content-Type": "application/json"}, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        urllib.request.urlopen(request)
+    assert refused.value.code == 400
+
+
+def test_expects_lists_what_a_start_point_needs(base):
+    data = get_json(f"{base}/api/expects?" + urlencode({"root": "src/shop/cli.py::main"}))
+    assert data["reached"] and set(data["vars"]) == {"argv"}
+    assert data["argv"] is True and "SHOP_TOKEN" in data["env"]

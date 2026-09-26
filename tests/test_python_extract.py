@@ -30,6 +30,8 @@ def shape(items):
             out.append((it.kind, sorted(it.uses)))
         elif kind == "Raise":
             out.append(("raise", it.exc))
+        elif kind in ("Break", "Continue"):
+            out.append((kind.lower(),))
         else:
             raise AssertionError(f"unexpected item {kind}")
     return out
@@ -444,3 +446,101 @@ def test_expression_sources_are_exact_when_the_file_starts_with_blank_lines():
     mod = extract_module("m.py", b"\n\n# comment\ndef f(names):\n    for name in names:\n        pass\n")
     loop = mod.functions["m.py::f"].body[0]
     assert (loop.target, loop.iter) == ("name", "names")
+
+
+def test_break_and_continue_are_kept():
+    assert body('''
+        def f(xs):
+            for x in xs:
+                if x:
+                    break
+                continue
+    ''', "f") == [("loop", "for", "for x in xs", [("if", "x", [("break",)], []), ("continue",)])]
+
+
+def test_class_level_defaults_are_kept():
+    mod = ex('''
+        from dataclasses import dataclass, field
+
+        @dataclass
+        class Order:
+            name: str
+            qty: int = 1
+            tags: list = field(default_factory=list)
+            kind = "basic"
+    ''')
+    assert mod.classes["m.py::Order"].defaults == {"qty": "1", "tags": "field(default_factory=list)", "kind": '"basic"'}
+
+
+def test_the_main_guard_lines_are_known():
+    mod = ex('''
+        import os
+
+        DB = os.getenv("DB")
+
+
+        def main():
+            pass
+
+
+        if __name__ == "__main__":
+            main()
+    ''')
+    assert mod.guard == (10, 11)
+    assert ex("x = 1\n").guard is None
+
+
+def test_calls_in_conditional_expressions_run_only_on_their_branch():
+    fn = ex('''
+        def main(c):
+            x = load() if c else fallback()
+            y = first() or second()
+            z = check() and use()
+    ''').functions["m.py::main"]
+    assert shape(fn.body) == [
+        ("if", "c", [("call", "load", ["$1"])], [("call", "fallback", ["$2"])]),
+        ("assign", ["x"], ["$1", "$2", "c"]),
+        ("call", "first", ["$3"]),
+        ("if", "first()", [], [("call", "second", ["$4"])]),
+        ("assign", ["y"], ["$3", "$4"]),
+        ("call", "check", ["$5"]),
+        ("if", "check()", [("call", "use", ["$6"])], []),
+        ("assign", ["z"], ["$5", "$6"]),
+    ]
+    decision = fn.body[3]
+    assert (decision.test, fn.body[4].value) == ("__t3", "__t3 or __t4")
+
+
+def test_calls_inside_assignment_targets_run_before_the_assignment():
+    fn = ex('''
+        def main(cells, r, val):
+            cells.setdefault(r["x"], {})[r.get("kind")] = val
+            load().name = val
+    ''').functions["m.py::main"]
+    assert shape(fn.body) == [
+        ("call", "cells.setdefault", ["$1"]),
+        ("call", "r.get", ["$2"]),
+        ("assign", [], ["$1", "$2", "val"]),
+        ("call", "load", ["$3"]),
+        ("assign", [], ["$3", "val"]),
+    ]
+    assert fn.body[2].target == "__t1[__t2]"
+
+
+def test_yield_from_is_told_apart_from_yield():
+    fn = ex('''
+        def walk(xs):
+            yield 1
+            yield from xs
+    ''').functions["m.py::walk"]
+    assert [(r.kind, r.expr) for r in fn.body] == [("yield", "1"), ("yield from", "xs")]
+
+
+def test_method_names_are_kept_whatever_the_receiver():
+    fn = ex('''
+        def main(out, kind, x):
+            out[kind].append(x)
+            load().save()
+            run(x)
+    ''').functions["m.py::main"]
+    assert [(c.callee, c.method) for c in fn.body] == [("", "append"), ("load", ""), ("$1.save", "save"), ("run", "")]

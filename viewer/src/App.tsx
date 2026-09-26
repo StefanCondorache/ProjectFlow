@@ -5,8 +5,9 @@ import { Diagram, type TokenRun } from "./Diagram";
 import { layoutGraph } from "./elk";
 import type { Direction, Placed } from "./layout";
 import { Resizer } from "./Resizer";
+import { RunSetup } from "./RunSetup";
 import { Sidebar } from "./Sidebar";
-import { badgeFor, type Simulation } from "./sim";
+import { badgeFor, NO_SETUP, type Expects, type SimSetup, type Simulation } from "./sim";
 import { SimPanel } from "./SimPanel";
 import type { Entry, FlowGraph, FlowNode, ProjectInfo } from "./types";
 
@@ -16,7 +17,17 @@ interface SimState {
   index: number;
   playing: boolean;
   choices: Record<string, string>;
+  setup: SimSetup;
 }
+
+/** The form for the data a run starts with, while it is open. */
+interface SetupState {
+  setup: SimSetup;
+  label: string;
+  expects: Expects | null;
+}
+
+const sameSet = (a: string[], b: string[]) => a.length === b.length && [...a].sort().join(",") === [...b].sort().join(",");
 
 const LEFT = { initial: 290, min: 200, max: 560 };
 const RIGHT = { initial: 400, min: 300, max: 800 };
@@ -46,6 +57,7 @@ export function App() {
   // Bumped by automatic opens so the diagram re-frames as for a new root.
   const [opening, setOpening] = useState(0);
   const [sim, setSim] = useState<SimState | null>(null);
+  const [setupState, setSetupState] = useState<SetupState | null>(null);
   const [simBusy, setSimBusy] = useState(false);
   const [speed, setSpeed] = useState<number>(() => stored<number>("speed", 1));
   const [tab, setTab] = useState<"sim" | "details">("details");
@@ -57,11 +69,14 @@ export function App() {
   useEffect(() => localStorage.setItem("flowmap.right", String(rightWidth)), [rightWidth]);
   useEffect(() => localStorage.setItem("flowmap.speed", String(speed)), [speed]);
 
-  // A simulation belongs to the diagram it was started on.
+  // A simulation belongs to the function it was started on; opening or
+  // closing steps in it walks it again (see below).
+  const simKey = view ? [view.root, view.start ?? "", view.at ?? "", view.var ?? ""].join("|") : "";
   useEffect(() => {
     window.clearTimeout(dwell.current);
     setSim(null);
-  }, [view]);
+    setSetupState(null);
+  }, [simKey]);
 
   const go = useCallback((next: ViewState, mode: "push" | "replace", anchorId: string | null = null) => {
     writeHash(next, mode);
@@ -150,6 +165,8 @@ export function App() {
       const open = new Set(view.expanded);
       if (node.kind === "group") {
         for (const id of [...open]) if (id === node.id || id.startsWith(`${node.id}/`)) open.delete(id);
+        // Closing a box by hand takes over from "go inside every step".
+        setSim((s) => (s?.setup.autoOpen ? { ...s, setup: { ...s.setup, autoOpen: false } } : s));
       } else {
         open.add(node.id);
       }
@@ -204,38 +221,73 @@ export function App() {
 
   // ── simulation ─────────────────────────────────────────────────────────
 
-  const startSimulation = async () => {
+  /** Show the steps a run went into (with "go inside every step" it opens more). */
+  const syncExpanded = (data: Simulation) => {
+    if (view && !sameSet(data.expanded, view.expanded)) go({ ...view, expanded: data.expanded }, "replace");
+  };
+
+  const openSetup = (at: string | null, label: string) => {
     if (!view || view.at) return;
+    const base = sim?.setup ?? NO_SETUP;
+    const setup = { ...base, at, inputs: at === base.at ? base.inputs : {} };
+    setSetupState({ setup, label, expects: null });
+    setTab("sim");
+    api
+      .expects(view, at ?? "s")
+      .then((expects) => setSetupState((s) => (s && s.setup.at === at ? { ...s, expects } : s)))
+      .catch((e) => flash(`Could not look at the data there: ${e}`));
+  };
+
+  const runSimulation = async (setup: SimSetup) => {
+    if (!view) return;
     setSimBusy(true);
     try {
-      const data = await api.simulate(view, {});
-      setSim((old) => ({ run: (old?.run ?? 0) + 1, data, index: 0, playing: true, choices: {} }));
+      const data = await api.simulate(view, {}, setup);
+      setSim((old) => ({ run: (old?.run ?? 0) + 1, data, index: 0, playing: true, choices: {}, setup }));
+      setSetupState(null);
       setTab("sim");
+      syncExpanded(data);
     } catch (e) {
       flash(`Could not simulate: ${e}`);
     } finally {
       setSimBusy(false);
     }
   };
+
+  /** Walk again with other data or answers, staying at the same frame. */
+  const rerun = async (setup: SimSetup, choices: Record<string, string>, index: number, advance = false) => {
+    if (!view) return;
+    setSimBusy(true);
+    try {
+      const data = await api.simulate(view, choices, setup);
+      const at = Math.max(0, Math.min(index + (advance ? 1 : 0), data.frames.length - 1));
+      setSim((s) => (s ? { ...s, data, choices, setup, index: at, playing: advance || s.playing } : s));
+      syncExpanded(data);
+    } catch (e) {
+      flash(`Could not simulate: ${e}`);
+    } finally {
+      setSimBusy(false);
+    }
+  };
+
+  // Opening or closing a step while a run is on: walk the new diagram.
+  const expandedKey = view ? [...view.expanded].sort().join(",") : "";
+  useEffect(() => {
+    if (!sim || !view || view.at || sameSet(view.expanded, sim.data.expanded)) return;
+    void rerun(sim.setup, sim.choices, sim.index);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expandedKey]);
 
   const stopSimulation = () => {
     window.clearTimeout(dwell.current);
     setSim(null);
+    setSetupState(null);
     if (!selected) setTab("details");
   };
 
-  const choose = async (value: string) => {
-    if (!view || !sim?.data.choice) return;
-    const choices = { ...sim.choices, [sim.data.choice.node]: value };
-    setSimBusy(true);
-    try {
-      const data = await api.simulate(view, choices);
-      setSim({ ...sim, data, choices, index: Math.min(sim.index + 1, data.frames.length - 1), playing: true });
-    } catch (e) {
-      flash(`Could not simulate: ${e}`);
-    } finally {
-      setSimBusy(false);
-    }
+  const choose = (value: string) => {
+    if (!sim?.data.choice) return;
+    void rerun(sim.setup, { ...sim.choices, [sim.data.choice.node]: value }, sim.index, true);
   };
 
   const onArrive = useCallback(() => {
@@ -301,8 +353,10 @@ export function App() {
 
   const selectedNode = graph?.nodes.find((n) => n.id === selected) ?? null;
   const title = view?.start ?? graph?.nodes.find((n) => n.kind === "start")?.label ?? "";
-  const rightOpen = selectedNode !== null || sim !== null;
-  const showing = sim && (tab === "sim" || !selectedNode) ? "sim" : "details";
+  const simulating = sim !== null || setupState !== null;
+  const rightOpen = selectedNode !== null || simulating;
+  const showing = simulating && (tab === "sim" || !selectedNode) ? "sim" : "details";
+  const frameNode = sim ? (graph?.nodes.find((n) => n.id === sim.data.frames[sim.index]?.node) ?? null) : null;
   const columns = [`${leftWidth}px`, "5px", "minmax(0, 1fr)", ...(rightOpen ? ["5px", `${rightWidth}px`] : [])].join(" ");
 
   return (
@@ -380,7 +434,7 @@ export function App() {
             ) : (
               <button
                 className="primary"
-                onClick={startSimulation}
+                onClick={() => openSetup(null, title)}
                 disabled={simBusy || !placed}
                 title="Send data through this diagram, step by step"
               >
@@ -445,7 +499,7 @@ export function App() {
       )}
       {rightOpen && (
         <aside className="inspector">
-          {sim && (
+          {simulating && (
             <div className="tabs" role="tablist">
               <button role="tab" aria-selected={showing === "sim"} className={showing === "sim" ? "is-on" : ""} onClick={() => setTab("sim")}>
                 Simulation
@@ -466,10 +520,21 @@ export function App() {
               </button>
             </div>
           )}
-          {showing === "sim" && sim ? (
+          {showing === "sim" && setupState ? (
+            <RunSetup
+              key={setupState.setup.at ?? "start"}
+              label={setupState.label}
+              expects={setupState.expects}
+              setup={setupState.setup}
+              busy={simBusy}
+              onRun={runSimulation}
+              onCancel={() => setSetupState(null)}
+            />
+          ) : showing === "sim" && sim ? (
             <SimPanel
               sim={sim.data}
               index={sim.index}
+              node={frameNode}
               playing={sim.playing}
               speed={speed}
               busy={simBusy}
@@ -485,6 +550,12 @@ export function App() {
               }}
               onSpeed={setSpeed}
               onChoose={choose}
+              onSetup={() => {
+                const at = sim.setup.at;
+                openSetup(at, at ? (graph?.nodes.find((n) => n.id === at)?.label ?? at) : title);
+              }}
+              onGoInside={toggle}
+              onProvide={(nodeId, value) => void rerun({ ...sim.setup, provided: { ...sim.setup.provided, [nodeId]: value } }, sim.choices, sim.index)}
             />
           ) : (
             selectedNode && (
@@ -494,6 +565,7 @@ export function App() {
                 onToggle={toggle}
                 onEnter={enter}
                 onFollow={follow}
+                onSimulateFrom={view?.at ? undefined : (node) => openSetup(node.id === "s" ? null : node.id, node.label)}
                 onClose={() => setSelected(null)}
               />
             )

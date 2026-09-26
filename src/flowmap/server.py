@@ -11,6 +11,11 @@ It binds to 127.0.0.1 and only ever reads the analysed project.
     GET /api/search?q=                       functions whose name matches, best first
     GET /api/simulate?root=&expand=&start=&choices=node=yes,...
                                              walk the diagram with its data, frame by frame
+    POST /api/simulate                       the same, with real data: a JSON object with
+                                             root, expand, start, choices, inputs, env, argv,
+                                             provided, start_at, auto_open
+    GET /api/expects?root=&expand=&at=       the variables at a node (for a walk started
+                                             there), plus the env vars and command line read
 """
 
 from __future__ import annotations
@@ -30,9 +35,10 @@ from flowmap.journey import build_journey
 from flowmap.ir import Call, walk
 from flowmap.mermaid import to_mermaid
 from flowmap.project import Project
-from flowmap.simulate import simulate
+from flowmap.simulate import expects, simulate
 
 WEB_DIR = Path(__file__).parent / "web"
+MAX_BODY = 5_000_000
 _TYPES = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml"}
 
 
@@ -79,6 +85,15 @@ def project_summary(project: Project) -> dict:
     }
 
 
+def _typed(body: dict, key: str, kind: type, default):
+    value = body.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, kind):
+        raise ValueError(f"{key}: expected {kind.__name__}")
+    return value
+
+
 class _Handler(BaseHTTPRequestHandler):
     project: Project
     web_dir: Path
@@ -97,17 +112,34 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/mermaid": self._mermaid,
             "/api/source": self._source,
             "/api/simulate": self._simulate,
+            "/api/expects": self._expects,
             "/api/search": self._search,
         }
+        route = routes.get(url.path)
+        self._answer(lambda: route(query) if route is not None else self._static(unquote(url.path)))
+
+    def do_POST(self) -> None:
+        url = urlsplit(self.path)
+
+        def answer() -> None:
+            if url.path != "/api/simulate":
+                raise NotFound(url.path)
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= MAX_BODY:
+                raise ValueError("expected a JSON body")
+            body = json.loads(self.rfile.read(length))
+            if not isinstance(body, dict):
+                raise ValueError("expected a JSON object")
+            self._run_simulation(body)
+
+        self._answer(answer)
+
+    def _answer(self, respond) -> None:
         try:
-            route = routes.get(url.path)
-            if route is not None:
-                route(query)
-            else:
-                self._static(unquote(url.path))
+            respond()
         except NotFound as err:
             self._send(404, "application/json", json.dumps({"error": str(err)}).encode())
-        except (ValueError, KeyError) as err:
+        except (ValueError, KeyError, TypeError) as err:  # json errors are ValueErrors
             self._send(400, "application/json", json.dumps({"error": str(err)}).encode())
 
     # responses
@@ -183,13 +215,49 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(hits)
 
     def _simulate(self, query: dict) -> None:
+        self._run_simulation(
+            {
+                "root": query.get("root", ""),
+                "expand": [part for part in query.get("expand", "").split(",") if part],
+                "start": query.get("start") or None,
+                "choices": dict(part.rsplit("=", 1) for part in query.get("choices", "").split(",") if "=" in part),
+            }
+        )
+
+    def _run_simulation(self, body: dict) -> None:
+        root = body.get("root")
+        if root not in self.project.functions:
+            raise NotFound(f"unknown function {root!r}")
+        argv = _typed(body, "argv", list, None)
+        sim = simulate(
+            self.project,
+            root,
+            expanded=set(_typed(body, "expand", list, [])),
+            start_label=_typed(body, "start", str, None),
+            choices={str(k): str(v) for k, v in _typed(body, "choices", dict, {}).items()},
+            inputs=_typed(body, "inputs", dict, {}),
+            env=_typed(body, "env", dict, None),
+            argv=[str(a) for a in argv] if argv is not None else None,
+            provided=_typed(body, "provided", dict, {}),
+            start_at=_typed(body, "start_at", str, None),
+            auto_open=bool(_typed(body, "auto_open", bool, False)),
+        )
+        self._json(
+            {
+                "status": sim.status,
+                "choice": sim.choice,
+                "error": sim.error,
+                "expanded": sim.expanded,
+                "frames": [asdict(f) for f in sim.frames],
+            }
+        )
+
+    def _expects(self, query: dict) -> None:
         root = query.get("root", "")
         if root not in self.project.functions:
             raise NotFound(f"unknown function {root!r}")
         expanded = {part for part in query.get("expand", "").split(",") if part}
-        choices = dict(part.rsplit("=", 1) for part in query.get("choices", "").split(",") if "=" in part)
-        sim = simulate(self.project, root, expanded=expanded, start_label=query.get("start") or None, choices=choices)
-        self._json({"status": sim.status, "choice": sim.choice, "frames": [asdict(f) for f in sim.frames]})
+        self._json(expects(self.project, root, expanded, query.get("at") or "s"))
 
     def _source(self, query: dict) -> None:
         file = query.get("file", "")

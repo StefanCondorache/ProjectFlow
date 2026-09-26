@@ -131,3 +131,16 @@ def test_annotation_with_a_nested_union_does_not_hang(tmp_path):
     )
     project = load_project(tmp_path)
     assert resolved(project, "m.py::f", "opts.get")[:2] == ("external", "dict.get")
+
+
+def test_types_resolve_annotations_and_what_classes_derive_from(tmp_path):
+    (tmp_path / "models.py").write_text(
+        "class ShopError(Exception):\n    pass\n\n\nclass NotFound(ShopError, KeyError):\n    pass\n\n\nclass Order:\n    pass\n"
+    )
+    (tmp_path / "app.py").write_text("from models import Order\n")
+    types = load_project(tmp_path).resolvers["python"]
+    assert types.class_of("app.py", "Optional[Order]") == "models.py::Order"
+    assert types.class_of("app.py", "int") is None
+    lineage = types.lineage("models.py::NotFound")
+    assert lineage[:2] == ["NotFound", "ShopError"]
+    assert {"KeyError", "LookupError", "Exception", "BaseException"} <= set(lineage)

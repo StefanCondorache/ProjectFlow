@@ -156,6 +156,8 @@ export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect
       tokenAt.current = null;
       return;
     }
+    // A frame in a box that is still being laid out (just opened) waits for it.
+    if (!placed.nodes.some((p) => p.node.id === run.frame.node)) return;
     const points = tokenPath(placed, run.frame, run.previous, tokenAt.current, direction);
     if (points.length === 0) {
       arrive.current();
@@ -296,6 +298,7 @@ export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect
             p={p}
             selected={p.node.id === selected}
             current={run?.frame.node === p.node.id}
+            failing={run?.frame.node === p.node.id && Boolean(run.frame.error)}
             onToggle={onToggle}
             following={following}
           />
@@ -359,20 +362,21 @@ export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect
             p={p}
             selected={p.node.id === selected}
             current={run?.frame.node === p.node.id}
+            failing={run?.frame.node === p.node.id && Boolean(run.frame.error)}
             onToggle={onToggle}
             following={following}
           />
         ))}
         {run && token && (
           <>
-            <svg className="token-layer" width={placed.width} height={placed.height} aria-hidden>
+            <svg className={cx("token-layer", run.frame.error && "is-failing")} width={placed.width} height={placed.height} aria-hidden>
               <g transform={`translate(${token.x} ${token.y})`}>
                 <circle r={13} className="token-halo" />
                 <circle r={8} className="token-core" />
                 <path d="M -4 -5 L 6 0 L -4 5 Z" className="token-arrow" transform={`rotate(${token.angle})`} />
               </g>
             </svg>
-            <div className="token-badge" style={{ left: token.x + 14, top: token.y - 34 }}>
+            <div className={cx("token-badge", run.frame.error && "is-failing")} style={{ left: token.x + 14, top: token.y - 34 }}>
               {run.badge}
             </div>
           </>
@@ -401,6 +405,8 @@ interface BoxProps {
   p: PlacedNode;
   selected: boolean;
   current?: boolean;
+  /** The data is raising an error here. */
+  failing?: boolean;
   onToggle: (node: FlowNode) => void;
   following: boolean;
 }
@@ -422,7 +428,7 @@ function ToggleButton({ node, open, onToggle }: { node: FlowNode; open: boolean;
   );
 }
 
-function NodeBox({ p, selected, current, onToggle, following }: BoxProps) {
+function NodeBox({ p, selected, current, failing, onToggle, following }: BoxProps) {
   const { node } = p;
   const d = node.detail;
   const style = { left: p.x, top: p.y, width: p.width, height: p.height };
@@ -434,6 +440,7 @@ function NodeBox({ p, selected, current, onToggle, following }: BoxProps) {
     d.confidence === "guess" && "is-guess",
     d.trail === "origin" && "is-origin",
     current && "is-current",
+    failing && "is-failing",
   );
   const common = { className, style, "data-node": node.id, "data-kind": node.kind, title: tooltip(node) };
 
@@ -509,7 +516,7 @@ function NodeBox({ p, selected, current, onToggle, following }: BoxProps) {
   }
 }
 
-function FrameBox({ p, selected, current, onToggle, following }: BoxProps) {
+function FrameBox({ p, selected, current, failing, onToggle, following }: BoxProps) {
   const { node } = p;
   const style = { left: p.x, top: p.y, width: p.width, height: p.height };
   const title =
@@ -522,7 +529,7 @@ function FrameBox({ p, selected, current, onToggle, following }: BoxProps) {
           : node.label;
   return (
     <div
-      className={cx("frame", `frame-${node.kind}`, selected && "is-selected", current && "is-current")}
+      className={cx("frame", `frame-${node.kind}`, selected && "is-selected", current && "is-current", failing && "is-failing")}
       style={style}
       data-node={node.id}
       data-kind={node.kind}

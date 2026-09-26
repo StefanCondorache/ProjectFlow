@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import type { Placed } from "./layout";
-import { badgeFor, pathLength, pointAt, restingPoint, tokenPath, type SimFrame } from "./sim";
+import { badgeFor, joinArgs, pathLength, plainOf, pointAt, readInput, restingPoint, splitArgs, tokenPath, type SimFrame } from "./sim";
 
 const placed: Placed = {
   width: 400,
@@ -24,6 +24,8 @@ const frame = (node: string, edge: [string, string] | null, hop = false): SimFra
   note: "",
   stack: [],
   changes: { added: [], changed: [], removed: [] },
+  outputs: [],
+  error: null,
 });
 
 it("rests at the side of a box the flow comes in by, so labels stay readable", () => {
@@ -69,4 +71,23 @@ it("the badge names what the token carries, or what just changed", () => {
   const carrying = { ...frame("s", null), stack: [{ function: "f", label: "f", file: "m.py", vars: { parser: { t: "?" as const, from: "p()" }, args: { t: "val" as const, v: 1 } } }] };
   expect(badgeFor(carrying)).toBe("parser · args");
   expect(badgeFor({ ...carrying, changes: { added: ["cfg.mode", "x"], changed: [], removed: [] } })).toBe("+ cfg.mode +1");
+});
+
+it("turns shown values back into JSON to edit", () => {
+  expect(plainOf({ t: "dict", v: { a: { t: "val", v: 1 }, b: { t: "list", v: [{ t: "val", v: "x" }] } } })).toEqual({ a: 1, b: ["x"] });
+  expect(plainOf({ t: "obj", cls: "Order", v: { qty: { t: "val", v: 2 } } })).toEqual({ qty: 2 });
+  expect(plainOf({ t: "?", from: "load()" })).toBeUndefined();
+  expect(plainOf({ t: "val", v: "2026-01-02", type: "date" })).toBe("2026-01-02");
+});
+
+it("splits a command line like a shell", () => {
+  expect(splitArgs(`--name "a b" --x='c d' plain`)).toEqual(["--name", "a b", "--x=c d", "plain"]);
+  expect(splitArgs("   ")).toEqual([]);
+  expect(joinArgs(["--name", "a b", "x"])).toBe(`--name "a b" x`);
+});
+
+it("reads what is typed as JSON, or else as text", () => {
+  expect(readInput('{"a": 1}')).toEqual({ value: { a: 1 }, text: false });
+  expect(readInput("42")).toEqual({ value: 42, text: false });
+  expect(readInput("hello")).toEqual({ value: "hello", text: true });
 });
