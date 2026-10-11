@@ -17,6 +17,8 @@ export interface ProjectInfo {
   files: string[];
   stats: { files: number; functions: number; classes: number; calls: number; project_calls: number };
   entries: Entry[];
+  inventory?: { files: number; parsed_files: number; languages: Record<string, number> };
+  capabilities?: { overview: boolean; flow_languages: string[]; simulation_languages: string[] };
 }
 
 export type NodeKind =
@@ -31,9 +33,29 @@ export type NodeKind =
   | "handler"
   | "raise"
   | "group"
-  | "file";
+  | "file"
+  | "folder"
+  | "module"
+  | "config"
+  | "document"
+  | "asset"
+  | "external";
 
-export interface Detail {
+export interface MapDetail {
+  path?: string;
+  category?: string;
+  language?: string;
+  files?: number;
+  size?: number;
+  readable?: boolean;
+  analysis?: string;
+  container?: boolean;
+  expanded?: boolean;
+  expandable?: boolean;
+  functions?: { id: string; label: string; line: number }[];
+}
+
+export interface Detail extends MapDetail {
   target?: string | null;
   cls?: string | null;
   function?: string;
@@ -70,9 +92,35 @@ export interface FlowEdge {
   source: string;
   target: string;
   label: string;
-  kind: "flow" | "yes" | "no" | "case" | "error" | "return";
+  kind: "flow" | "yes" | "no" | "case" | "error" | "return" | "dependency";
   /** Variables behind a data label ("$1" is a nested call's result). */
   data: string[];
+  count?: number;
+  confidence?: "verified" | "inferred";
+  evidence?: Evidence[];
+}
+
+export interface Evidence {
+  file: string;
+  line: number;
+  text: string;
+}
+
+export interface OverviewInfo {
+  path: string;
+  files: number;
+  total_files: number;
+  parsed_files: number;
+  relationships: number;
+  languages: Record<string, number>;
+  truncated: boolean;
+}
+
+export interface MapSearchResult {
+  path: string;
+  label: string;
+  category: string;
+  language: string;
 }
 
 export interface TrailInfo {
@@ -87,6 +135,7 @@ export interface FlowGraph {
   nodes: FlowNode[];
   edges: FlowEdge[];
   trail?: TrailInfo;
+  overview?: OverviewInfo;
 }
 
 export interface SourceLines {

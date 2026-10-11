@@ -33,7 +33,9 @@ from flowmap.dataflow import trace
 from flowmap.flow import Graph, build_flow, display_name
 from flowmap.journey import build_journey
 from flowmap.ir import Call, walk
+from flowmap.inventory import contained_path, read_source
 from flowmap.mermaid import to_mermaid
+from flowmap.overview import build_overview
 from flowmap.project import Project
 from flowmap.simulate import expects, simulate
 
@@ -82,6 +84,8 @@ def project_summary(project: Project) -> dict:
             "project_calls": to_project,
         },
         "entries": [asdict(e) for e in project.entries],
+        "inventory": {"files": len(project.inventory.files), "parsed_files": len(project.modules), "languages": project.inventory.languages()},
+        "capabilities": {"overview": True, "flow_languages": sorted({m.language for m in project.modules.values()}), "simulation_languages": sorted({m.language for m in project.modules.values() if m.language == "python"})},
     }
 
 
@@ -105,8 +109,14 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         url = urlsplit(self.path)
         query = {k: v[-1] for k, v in parse_qs(url.query).items()}
+        repeated = parse_qs(url.query, keep_blank_values=True)
+        if "open" in repeated:
+            query["open"] = repeated["open"]
         routes = {
             "/api/project": self._project,
+            "/api/overview": self._overview,
+            "/api/map-search": self._map_search,
+            "/api/map-source": self._map_source,
             "/api/flow": self._flow,
             "/api/trail": self._flow,
             "/api/mermaid": self._mermaid,
@@ -185,8 +195,39 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(body)
 
     def _mermaid(self, query: dict) -> None:
-        text = to_mermaid(self._graph(query)[0], direction=query.get("dir", "LR"))
+        graph = self._overview_graph(query) if query.get("mode") == "map" else self._graph(query)[0]
+        text = to_mermaid(graph, direction=query.get("dir", "LR"))
         self._send(200, "text/plain; charset=utf-8", text.encode())
+
+    def _overview_graph(self, query: dict) -> Graph:
+        expanded = set(query["open"]) if "open" in query else {part for part in query.get("expand", "").split(",") if part}
+        try:
+            return build_overview(self.project, path=query.get("path", ""), expanded=expanded)
+        except ValueError as err:
+            raise NotFound(str(err)) from err
+
+    def _overview(self, query: dict) -> None:
+        self._json(asdict(self._overview_graph(query)))
+
+    def _map_search(self, query: dict) -> None:
+        needle = query.get("q", "").strip().lower()
+        ranked = []
+        if needle:
+            for path, item in self.project.inventory.files.items():
+                label = Path(path).name
+                if needle in path.lower():
+                    rank = 0 if label.lower() == needle else 1 if label.lower().startswith(needle) else 2
+                    ranked.append((rank, len(path), path, {"path": path, "label": label, "category": item.category, "language": item.language}))
+        self._json([hit for *_, hit in sorted(ranked, key=lambda hit: hit[:3])[:50]])
+
+    def _map_source(self, query: dict) -> None:
+        start = int(query.get("start", 1))
+        end = int(query["end"]) if query.get("end") else None
+        try:
+            source = read_source(self.project.root, self.project.inventory, query.get("file", ""), start, end)
+        except ValueError as err:
+            raise NotFound(str(err)) from err
+        self._json(source)
 
     def _search(self, query: dict) -> None:
         needle = query.get("q", "").strip().lower()
@@ -263,7 +304,10 @@ class _Handler(BaseHTTPRequestHandler):
         file = query.get("file", "")
         if file not in self.project.modules:
             raise NotFound(f"not an analysed file: {file!r}")
-        lines = (self.project.root / file).read_text(errors="replace").splitlines()
+        try:
+            lines = contained_path(self.project.root, file).read_text(errors="replace").splitlines()
+        except (ValueError, OSError) as err:
+            raise NotFound(str(err)) from err
         start = max(1, int(query.get("start", 1)))
         end = min(len(lines), int(query.get("end", len(lines))))
         self._json({"file": file, "start": start, "lines": lines[start - 1 : end]})

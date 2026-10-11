@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { api, type SearchHit } from "./api";
-import type { Entry, ProjectInfo } from "./types";
+import { useEffect, useRef, useState } from "react";
+import { api, languageName, type SearchHit } from "./api";
+import type { Entry, MapSearchResult, ProjectInfo } from "./types";
 
 const KIND_TEXT: Record<string, string> = {
   compose: "compose",
@@ -22,73 +22,211 @@ const GROUPS = [
 
 const number = new Intl.NumberFormat();
 
+export function requestFunctionSearch(query: string, onResults: (hits: SearchHit[]) => void, onError: () => void): () => void {
+  let live = true;
+  const timer = window.setTimeout(() => {
+    api.search(query).then(
+      (hits) => live && onResults(hits),
+      () => live && onError(),
+    );
+  }, 150);
+  return () => {
+    live = false;
+    window.clearTimeout(timer);
+  };
+}
+
+export function requestMapSearch(query: string, onResults: (hits: MapSearchResult[]) => void, onError: () => void): () => void {
+  let live = true;
+  const timer = window.setTimeout(() => {
+    api.mapSearch(query).then(
+      (hits) => live && onResults(hits),
+      () => live && onError(),
+    );
+  }, 150);
+  return () => {
+    live = false;
+    window.clearTimeout(timer);
+  };
+}
+
+interface SearchState {
+  query: string;
+  status: "pending" | "ready" | "error";
+  hits: SearchHit[];
+}
+
+interface FileSearchState {
+  query: string;
+  status: "pending" | "ready" | "error";
+  hits: MapSearchResult[];
+}
+
 interface Props {
   project: ProjectInfo;
   current: string | null;
   onOpen: (entry: Entry) => void;
   onFunction: (id: string) => void;
+  map?: boolean;
+  path?: string;
+  onMap?: () => void;
+  onFile?: (path: string) => void;
+  onClose?: () => void;
+  modal?: boolean;
 }
 
-export function Sidebar({ project, current, onOpen, onFunction }: Props) {
+export function Sidebar({ project, current, onOpen, onFunction, onClose, modal, map = false, path, onMap, onFile }: Props) {
   const [query, setQuery] = useState("");
-  const [hits, setHits] = useState<SearchHit[]>([]);
+  const [searchState, setSearchState] = useState<SearchState>({ query: "", status: "ready", hits: [] });
+  const [fileSearchState, setFileSearchState] = useState<FileSearchState>({ query: "", status: "ready", hits: [] });
+  const [searchAttempt, setSearchAttempt] = useState(0);
+  const searchInput = useRef<HTMLInputElement>(null);
   const needle = query.trim().toLowerCase();
+  const functionSearch = searchState.query === needle ? searchState : { query: needle, status: "pending", hits: [] };
+  const fileSearch = fileSearchState.query === needle ? fileSearchState : { query: needle, status: "pending", hits: [] };
+  const search = map ? fileSearch : functionSearch;
 
   useEffect(() => {
-    if (!needle) {
-      setHits([]);
+    if (!needle || map) {
+      setSearchState({ query: "", status: "ready", hits: [] });
       return;
     }
-    const timer = window.setTimeout(() => {
-      api
-        .search(needle)
-        .then(setHits)
-        .catch(() => setHits([]));
-    }, 150);
-    return () => window.clearTimeout(timer);
-  }, [needle]);
+    setSearchState({ query: needle, status: "pending", hits: [] });
+    return requestFunctionSearch(
+      needle,
+      (results) => setSearchState({ query: needle, status: "ready", hits: results }),
+      () => setSearchState({ query: needle, status: "error", hits: [] }),
+    );
+  }, [needle, searchAttempt, map]);
+
+  useEffect(() => {
+    if (!needle || !map) {
+      setFileSearchState({ query: "", status: "ready", hits: [] });
+      return;
+    }
+    setFileSearchState({ query: needle, status: "pending", hits: [] });
+    return requestMapSearch(
+      needle,
+      (hits) => setFileSearchState({ query: needle, status: "ready", hits }),
+      () => setFileSearchState({ query: needle, status: "error", hits: [] }),
+    );
+  }, [needle, searchAttempt, map]);
 
   const matches = (e: Entry) => !needle || e.label.toLowerCase().includes(needle) || e.target.toLowerCase().includes(needle);
   const { stats } = project;
-  const groups = GROUPS.map((g) => ({ ...g, entries: project.entries.filter((e) => g.kinds.includes(e.kind) && matches(e)) })).filter(
+  const knownKinds = new Set(GROUPS.flatMap((group) => group.kinds));
+  const allGroups = [...GROUPS, { title: "Other entry points", kinds: project.entries.filter((entry) => !knownKinds.has(entry.kind)).map((entry) => entry.kind) }];
+  const groups = allGroups.map((g) => ({ ...g, entries: project.entries.filter((e) => g.kinds.includes(e.kind) && matches(e)) })).filter(
     (g) => g.entries.length > 0,
   );
+  const languages = Object.entries(project.inventory?.languages ?? {}).filter(([, count]) => count > 0).sort((a, b) => b[1] - a[1]);
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" role={modal ? "dialog" : undefined} aria-modal={modal || undefined} aria-label="Project navigation">
       <header className="sidebar-head">
-        <div className="brand">flowmap</div>
-        <h1 title={project.root}>{project.name}</h1>
-        <p className="stats">
-          {number.format(stats.files)} files · {number.format(stats.functions)} functions · {project.entries.length} entry points
-        </p>
+        <div className="brand">
+          <svg className="brand-mark" width="30" height="30" viewBox="0 0 30 30" fill="none" aria-hidden="true">
+            <rect x="1" y="1" width="28" height="28" rx="8" fill="currentColor" />
+            <path d="M10 9v12m0-6h10V9" stroke="var(--surface)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+            <circle cx="10" cy="9" r="2.5" fill="var(--surface)" />
+            <circle cx="10" cy="21" r="2.5" fill="var(--surface)" />
+            <circle cx="20" cy="9" r="2.5" fill="var(--surface)" />
+          </svg>
+          <span className="brand-name">flowmap</span>
+          <button className="navigation-close" type="button" aria-label="Close project navigation" onClick={onClose}>
+            <span aria-hidden="true">×</span>
+          </button>
+        </div>
+        <div className="project-card">
+          <p className="project-eyebrow">Project overview</p>
+          <h1 title={project.root}>{project.name}</h1>
+          <dl className="project-metrics">
+            <div className="project-metric">
+              <dt>Files</dt>
+              <dd>{number.format(project.inventory?.files ?? stats.files)}</dd>
+            </div>
+            <div className="project-metric">
+              <dt>Functions</dt>
+              <dd>{number.format(stats.functions)}</dd>
+            </div>
+            <div className="project-metric">
+              <dt>Entries</dt>
+              <dd>{number.format(project.entries.length)}</dd>
+            </div>
+          </dl>
+        </div>
       </header>
-      <input
-        className="filter"
-        type="search"
-        placeholder="Search entry points and functions"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        aria-label="Search entry points and functions"
-      />
+      <div className="search-box">
+        <svg className="search-icon" width="16" height="16" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" strokeWidth="1.5" />
+          <path d="m13 13 4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+        <input
+          ref={searchInput}
+          className="filter"
+          type="search"
+          placeholder={map ? "Search project files…" : "Search entries or functions…"}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label={map ? "Search project files" : "Search entry points and functions"}
+          autoComplete="off"
+          spellCheck={false}
+        />
+        {query && (
+          <button
+            className="search-clear"
+            aria-label="Clear search"
+            title="Clear search"
+            onClick={() => {
+              setQuery("");
+              searchInput.current?.focus();
+            }}
+          >
+            ×
+          </button>
+        )}
+      </div>
       <div className="sidebar-list">
+        <ul className="entries">
+          <li><button className={`entry project-map-entry${map ? " is-current" : ""}`} aria-current={map ? "page" : undefined} onClick={onMap}>
+            <span className="entry-label">Project map</span>
+            <span className="entry-meta"><span>Files, folders &amp; dependencies</span><span>{number.format(project.inventory?.files ?? stats.files)} files</span></span>
+          </button></li>
+        </ul>
+        {map && needle && (
+          <section aria-busy={fileSearch.status === "pending"}>
+            <h2 className="section-title">Files <span className="count">{fileSearch.status === "pending" ? "…" : fileSearch.hits.length === 30 ? "30+" : fileSearch.hits.length}</span></h2>
+            {fileSearch.status === "pending" && <p className="search-state" role="status">Searching files…</p>}
+            {fileSearch.status === "error" && <p className="search-state is-error" role="status">File search is unavailable. <button className="link" onClick={() => setSearchAttempt((attempt) => attempt + 1)}>Retry</button></p>}
+            <ul className="entries">
+              {fileSearch.hits.map((hit) => <li key={hit.path}>
+                <button className={`entry${hit.path === path ? " is-current" : ""}`} aria-current={hit.path === path ? "page" : undefined} onClick={() => onFile?.(hit.path)} title={hit.path}>
+                  <code className="entry-label">{hit.label}</code>
+                  <span className="entry-meta"><span>{hit.path}</span><span>{languageName(hit.language)}</span></span>
+                </button>
+              </li>)}
+            </ul>
+            {fileSearch.status === "ready" && fileSearch.hits.length === 0 && <p className="search-state" role="status">No matching files. Try a filename or a shorter search.</p>}
+          </section>
+        )}
         {groups.map((group) => (
           <section key={group.title}>
-            <div className="section-title">
+            <h2 className="section-title">
               {group.title} <span className="count">{group.entries.length}</span>
-            </div>
+            </h2>
             <ul className="entries">
               {group.entries.map((entry) => (
                 <li key={entry.target}>
                   <button
                     className={entry.target === current ? "entry is-current" : "entry"}
+                    aria-current={entry.target === current ? "page" : undefined}
                     onClick={() => onOpen(entry)}
                     title={entry.sources.map((s) => s.text).join("\n")}
                   >
                     <code className="entry-label">{entry.label}</code>
                     <span className="entry-meta">
                       <span className={`kind kind-${entry.kind}`}>{KIND_TEXT[entry.kind] ?? entry.kind}</span>
-                      <span>{number.format(entry.reach)} functions</span>
+                      <span>{number.format(entry.reach)} {entry.reach === 1 ? "function" : "functions"}</span>
                     </span>
                   </button>
                 </li>
@@ -96,15 +234,26 @@ export function Sidebar({ project, current, onOpen, onFunction }: Props) {
             </ul>
           </section>
         ))}
-        {needle && (
-          <section>
-            <div className="section-title">
-              Functions <span className="count">{hits.length === 30 ? "30+" : hits.length}</span>
-            </div>
+        {!map && needle && (
+          <section aria-busy={functionSearch.status === "pending"}>
+            <h2 className="section-title">
+              Functions <span className="count">{functionSearch.status === "pending" ? "…" : functionSearch.hits.length === 30 ? "30+" : functionSearch.hits.length}</span>
+            </h2>
+            {functionSearch.status === "pending" && <p className="search-state" role="status">Searching functions…</p>}
+            {functionSearch.status === "error" && (
+              <p className="search-state is-error" role="status">
+                Function search is unavailable. <button className="link" onClick={() => setSearchAttempt((attempt) => attempt + 1)}>Retry</button>
+              </p>
+            )}
             <ul className="entries">
-              {hits.map((hit) => (
+              {functionSearch.hits.map((hit) => (
                 <li key={hit.id}>
-                  <button className={hit.id === current ? "entry is-current" : "entry"} onClick={() => onFunction(hit.id)} title={hit.doc ?? ""}>
+                  <button
+                    className={hit.id === current ? "entry is-current" : "entry"}
+                    aria-current={hit.id === current ? "page" : undefined}
+                    onClick={() => onFunction(hit.id)}
+                    title={hit.doc ?? ""}
+                  >
                     <code className="entry-label">{hit.label}</code>
                     <span className="entry-meta">
                       <span>
@@ -115,10 +264,27 @@ export function Sidebar({ project, current, onOpen, onFunction }: Props) {
                 </li>
               ))}
             </ul>
+            {functionSearch.status === "ready" && functionSearch.hits.length === 0 && groups.length > 0 && <p className="search-state">No matching functions.</p>}
           </section>
         )}
-        {needle && groups.length === 0 && hits.length === 0 && <p className="none">Nothing matches “{query}”.</p>}
+        {!map && needle && search.status === "ready" && groups.length === 0 && functionSearch.hits.length === 0 && (
+          <div className="sidebar-empty" role="status">
+            <strong>No results for “{query.trim()}”</strong>
+            <p>Try a function name, an entry point, or a shorter search.</p>
+          </div>
+        )}
+        {!needle && project.entries.length === 0 && (
+          <div className="sidebar-empty">
+            <strong>{map ? "Every file has a place" : "No entry points detected"}</strong>
+            <p>{map ? "Explore the project map or search for a file. Function flows appear where a language adapter supports them." : "Search for a function to start exploring this project."}</p>
+            <button className="link" onClick={() => searchInput.current?.focus()}>{map ? "Find a file →" : "Find a function →"}</button>
+          </div>
+        )}
       </div>
+      <footer className="sidebar-footer">
+        <span className="project-status"><span className="status-dot" aria-hidden="true" />Local project</span>
+        <span className="language-badges">{languages.map(([language, count]) => <span key={language} className="language-badge" title={`${number.format(count)} files`}>{languageName(language)}</span>)}</span>
+      </footer>
     </aside>
   );
 }

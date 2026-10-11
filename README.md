@@ -1,8 +1,9 @@
 # flowmap
 
-Point it at a project folder; get Mermaid-style flow diagrams of what the code
-does, from START to END, through files and functions. Nothing to configure and
-no AI: the same code always gives the same diagram.
+Point it at a project folder; explore its files, folders and observed imports in
+a project map. Python functions also have flow diagrams, data trails and
+simulation. Nothing to configure and no AI: the same code always gives the same
+diagram.
 
 ```
 flowmap ~/Projects/some-project
@@ -12,10 +13,20 @@ opens a local viewer in the browser (it only reads the folder, never writes to i
 
 ## What you see
 
+- **Project map**: every repository opens here, including projects without
+  supported source languages or entry points. Folder cards show file counts;
+  `+` expands an area in place. Source files, configuration, documents, assets
+  and unrecognized files all have a place. Arrows describe imports, and several
+  imports between collapsed areas share one counted link. Select a card for
+  metadata, dependency evidence and a bounded text preview where available.
+  Search finds project files; *Focus file* or *Focus folder* narrows the map,
+  with breadcrumbs and *Back to project* to return. A Python file's inspector
+  offers *Open flow* for its analyzed functions.
 - **Entry points**: the program's starts, found on their own: Docker/compose
   commands (following shell scripts they run), `pyproject` scripts, packages run
   with `python -m`, and `if __name__ == "__main__"` scripts, grouped with the
-  deployed ones first. The same search box finds any function by name.
+  deployed ones first. Opening an entry switches to its function flow; in flow
+  mode, the navigation search finds any analyzed function by name.
 - **Flow**: START on the left, END on the right (⇄ turns it top-down), the steps
   in between in the order they run. A step is a call into one of the project's own functions; `+` opens
   it in place, inside a frame named after its function and file. Diamonds are
@@ -65,13 +76,24 @@ opens a local viewer in the browser (it only reads the folder, never writes to i
 - **Details**: click any box for its docstring, where it is defined and called,
   the data in and out, how the call was resolved, and the source.
 
+The workspace shows project totals and a summary of the current diagram. The
+overview in the bottom-right lets you jump around a long flow; its outlined
+area shows your current position. Click the zoom percentage to return to 100%.
+
 Both side panels can be dragged wider or narrower (double-click the edge to reset).
+You can also focus a panel edge and use the arrow keys to resize it, or Home to
+reset it. Tab moves between diagram steps, Enter selects one, and Escape closes
+its details. On smaller screens, project navigation and the inspector open as
+drawers so the diagram keeps its space. The viewer follows your system's light
+or dark appearance and reduced-motion setting.
 
 Other outputs:
 
 ```
 flowmap <folder> --list                          # entry points, ranked
 flowmap <folder> --mermaid [ENTRY] [--depth N]   # Mermaid text for an entry (--vertical: top-down)
+flowmap <folder> --mermaid-map                    # project files, folders and dependencies
+flowmap <folder> --mermaid-map --focus src --expand dir:src/utils --vertical
 ```
 
 `ENTRY` is a number from `--list`, part of an entry's label, or a function id
@@ -79,9 +101,22 @@ such as `src/shop/orders.py::OrderService.place`.
 
 ## Languages
 
-Python today. Each language is an adapter (`src/flowmap/lang/`) that turns
-source into a shared model; entry detection from deployment files, diagrams,
-data trails and the viewer are shared.
+Project structure works for every language and file type. Inventory languages
+appear in the navigation, independently of semantic analysis support.
+
+- Resolved imports between Python project modules are shown as verified
+  dependency links, with file and line evidence. Unresolved references and
+  external modules remain inferred.
+- JavaScript and TypeScript imports are scanned conservatively from text and
+  shown as inferred, dashed links. This includes common static imports,
+  re-exports and literal `require` calls; computed module names and runtime
+  loading can be missed.
+- Other languages receive file/folder structure and readable text previews.
+
+Function flows, data trails and simulation currently support Python. Each
+semantic language adapter (`src/flowmap/lang/`) turns source into a shared
+model; the structural map and viewer work without one. Import links represent
+observed dependencies, not execution order.
 
 ## How calls are resolved
 
@@ -96,7 +131,12 @@ real run would be a later, optional layer.
 
 **Diagrams**
 
-- Python only, so far.
+- Function flows are Python only. Structural project maps work for all file
+  types; import enrichment currently covers Python and inferred JS/TS imports.
+- Project maps exclude ignored/generated directories and files outside the
+  project, including symlinks that escape it. Large maps and text previews are
+  bounded; a map notice suggests focusing an area when the visible node limit
+  is reached.
 - Calls are resolved without running anything: calls through variables,
   callbacks, `getattr`, registries or dependency injection cannot be followed,
   and are left out rather than guessed.

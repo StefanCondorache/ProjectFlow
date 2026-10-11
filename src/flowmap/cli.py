@@ -10,6 +10,7 @@ import time
 from flowmap.entries import Entry
 from flowmap.flow import build_flow
 from flowmap.mermaid import to_mermaid
+from flowmap.overview import build_overview
 from flowmap.project import Project, load_project
 from flowmap.server import WEB_DIR, start_viewer
 
@@ -48,6 +49,9 @@ def main(argv: list[str] | None = None) -> int:
         help="print a Mermaid flowchart; ENTRY is a number from --list, part of an entry label, or a function id",
     )
     parser.add_argument("--depth", type=int, default=0, help="open steps this many levels deep (with --mermaid)")
+    parser.add_argument("--mermaid-map", action="store_true", help="print the project structure and dependencies as Mermaid")
+    parser.add_argument("--focus", default="", help="relative file or folder to focus in --mermaid-map")
+    parser.add_argument("--expand", default="", help="comma-separated folder IDs to open in --mermaid-map")
     parser.add_argument("--vertical", action="store_true", help="top-down Mermaid instead of left to right")
     parser.add_argument("--port", type=int, default=8765, help="viewer port (a free one is used if taken)")
     parser.add_argument("--no-open", action="store_true", help="do not open a browser")
@@ -57,10 +61,19 @@ def main(argv: list[str] | None = None) -> int:
     print(f"flowmap: reading {args.path} …", file=sys.stderr)
     project = load_project(args.path)
     print(
-        f"flowmap: {len(project.modules)} files, {len(project.functions)} functions, "
+        f"flowmap: {len(project.inventory.files)} files ({len(project.modules)} analysed), {len(project.functions)} functions, "
         f"{len(project.entries)} entry points ({time.perf_counter() - started:.1f}s)",
         file=sys.stderr,
     )
+
+    if args.mermaid_map:
+        try:
+            graph = build_overview(project, path=args.focus, expanded={part for part in args.expand.split(",") if part})
+        except ValueError as err:
+            print(f"flowmap: {err}", file=sys.stderr)
+            return 2
+        sys.stdout.write(to_mermaid(graph, direction="TD" if args.vertical else "LR"))
+        return 0
 
     if args.mermaid:
         picked = pick_entry(project, args.mermaid)

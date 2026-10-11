@@ -56,7 +56,7 @@ def to_mermaid(graph: Graph, direction: str = "LR") -> str:
 
     def emit(parent: str | None, indent: str) -> None:
         for node in children.get(parent, []):
-            if node.kind in _FRAMES:
+            if node.kind in _FRAMES or node.kind == "folder" and node.detail.get("container"):
                 lines.append(f'{indent}subgraph {ids[node.id]}["{_esc(_title(node))}"]')
                 lines.append(f"{indent}  direction {inner}")
                 emit(node.id, indent + "  ")
@@ -66,8 +66,9 @@ def to_mermaid(graph: Graph, direction: str = "LR") -> str:
 
     emit(None, "  ")
     for edge in graph.edges:
-        arrow = "-.->" if edge.kind in ("error", "return") else "-->"
-        label = f'|"{_esc(edge.label)}"|' if edge.label else ""
+        arrow = "-.->" if edge.kind in ("error", "return") or edge.confidence == "inferred" else "-->"
+        edge_label = edge.label or (str(edge.count) if edge.count and edge.count > 1 else "")
+        label = f'|"{_esc(edge_label)}"|' if edge_label else ""
         lines.append(f"  {ids[edge.source]} {arrow}{label} {ids[edge.target]}")
 
     lines += _CLASS_DEFS

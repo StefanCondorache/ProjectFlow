@@ -1,6 +1,7 @@
 import { useRef } from "react";
 
 interface Props {
+  className?: string;
   label: string;
   /** Called with the pointer's horizontal movement since the last call. */
   onDrag: (dx: number) => void;
@@ -8,14 +9,15 @@ interface Props {
 }
 
 /** A thin vertical handle between two columns: drag to resize, double-click to reset. */
-export function Resizer({ label, onDrag, onReset }: Props) {
+export function Resizer({ className = "", label, onDrag, onReset }: Props) {
   const last = useRef<number | null>(null);
   return (
     <div
-      className="resizer"
+      className={`resizer ${className}`}
       role="separator"
       aria-orientation="vertical"
       aria-label={label}
+      tabIndex={0}
       title={`${label} (double-click to reset)`}
       onPointerDown={(event) => {
         last.current = event.clientX;
@@ -30,6 +32,22 @@ export function Resizer({ label, onDrag, onReset }: Props) {
       onPointerUp={() => {
         last.current = null;
         document.body.classList.remove("is-resizing");
+      }}
+      onPointerCancel={() => {
+        last.current = null;
+        document.body.classList.remove("is-resizing");
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+          event.preventDefault();
+          event.stopPropagation();
+          onDrag((event.key === "ArrowRight" ? 1 : -1) * (event.shiftKey ? 40 : 10));
+        }
+        if (event.key === "Home") {
+          event.preventDefault();
+          event.stopPropagation();
+          onReset();
+        }
       }}
       onDoubleClick={onReset}
     />

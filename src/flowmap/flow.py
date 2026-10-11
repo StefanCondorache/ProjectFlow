@@ -54,6 +54,9 @@ class Edge:
     label: str = ""
     kind: str = "flow"  # flow | yes | no | case | error
     data: list[str] = field(default_factory=list)  # variables behind a data label ($n = a nested call's result)
+    count: int | None = None
+    confidence: str | None = None
+    evidence: list[dict] | None = None
 
 
 @dataclass
@@ -61,6 +64,7 @@ class Graph:
     root: str
     nodes: list[Node] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
+    overview: dict | None = None
 
 
 def item_key(item: Item | Handler) -> str:

@@ -60,6 +60,94 @@ def test_project_lists_ranked_entries(base):
     assert "src/shop/worker.py" in data["files"]
 
 
+@pytest.fixture(scope="module")
+def map_base(tmp_path_factory):
+    root = tmp_path_factory.mktemp("generic")
+    (root / "src").mkdir()
+    (root / "src/app.ts").write_text("import '../value';\nexport const app = 1")
+    (root / "value.ts").write_text("export const value = 1")
+    (root / "notes ü.custom").write_text("\n".join(str(i) for i in range(400)))
+    (root / "image.png").write_bytes(b"\x89PNG\0")
+    (root / "comma,folder").mkdir()
+    (root / "comma,folder/readme.custom").write_text("notes")
+    server = make_server(load_project(root), web_dir=root, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", root
+    server.shutdown()
+    server.server_close()
+
+
+def test_generic_overview_summary_and_search_routes(map_base):
+    url, _ = map_base
+    summary = get_json(f"{url}/api/project")
+    assert summary["stats"]["files"] == 0 and summary["entries"] == []
+    assert summary["inventory"]["files"] == 5
+    assert summary["capabilities"]["overview"] is True
+    assert summary["capabilities"]["simulation_languages"] == []
+    graph = get_json(f"{url}/api/overview")
+    assert graph["root"] == "@project" and graph["overview"]["total_files"] == 5
+    assert any(n["id"] == "dir:src" and not n["detail"]["container"] for n in graph["nodes"])
+    opened = get_json(f"{url}/api/overview?expand=dir:src")
+    assert any(n["id"] == "file:src/app.ts" and n["parent"] == "dir:src" for n in opened["nodes"])
+    focused = get_json(f"{url}/api/overview?path=src/app.ts")
+    assert focused["overview"]["files"] == 1
+    assert focused["edges"][0]["confidence"] == "inferred"
+    hits = get_json(f"{url}/api/map-search?" + urlencode({"q": "notes ü"}))
+    assert hits == [{"path": "notes ü.custom", "label": "notes ü.custom", "category": "document", "language": "unknown"}]
+    assert get_json(f"{url}/api/map-search?q=") == []
+
+
+def test_map_source_bounds_and_rejects_uninventoried_or_binary_files(map_base):
+    url, _ = map_base
+    source = get_json(f"{url}/api/map-source?" + urlencode({"file": "notes ü.custom", "start": 4, "end": 400}))
+    assert source["start"] == 4 and source["lines"] == [str(i) for i in range(3, 203)]
+    for file in ("../../etc/passwd", "/etc/passwd", "missing", "image.png"):
+        assert status_of(f"{url}/api/map-source?" + urlencode({"file": file})) == 404
+    assert status_of(f"{url}/api/map-source?file=value.ts&start=bad") == 400
+    assert status_of(f"{url}/api/source?file=value.ts") == 404
+    assert status_of(f"{url}/api/overview?path=../") == 404
+
+
+def test_map_mermaid_route_does_not_require_a_function(map_base):
+    url, _ = map_base
+    kind, data = get(f"{url}/api/mermaid?mode=map&expand=dir:src&dir=TD")
+    assert kind == "text/plain"
+    assert data.decode().startswith("flowchart TD") and "subgraph" in data.decode()
+    assert "-.->" in data.decode()
+
+
+def test_map_repeated_open_parameters_preserve_commas_in_folder_names(map_base):
+    url, _ = map_base
+    query = urlencode({"open": ["dir:src", "dir:comma,folder"], "expand": "dir:ignored"}, doseq=True)
+    graph = get_json(f"{url}/api/overview?" + query)
+    assert any(n["id"] == "file:comma,folder/readme.custom" for n in graph["nodes"])
+    assert any(n["id"] == "file:src/app.ts" for n in graph["nodes"])
+    _, text = get(f"{url}/api/mermaid?mode=map&" + query)
+    assert "readme.custom" in text.decode() and "app.ts" in text.decode()
+
+
+def test_source_endpoints_recheck_changed_symlink_containment(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "app.py").write_text("def run():\n    pass\n")
+    (root / "notes.txt").write_text("notes")
+    project = load_project(root)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret")
+    for name in ("app.py", "notes.txt"):
+        (root / name).unlink()
+        (root / name).symlink_to(outside)
+    server = make_server(project, web_dir=root, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        assert status_of(f"{url}/api/source?file=app.py") == 404
+        assert status_of(f"{url}/api/map-source?file=notes.txt") == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_flow_with_an_opened_step(base):
     closed = get_json(f"{base}/api/flow?" + urlencode({"root": WORKER, "start": "python -m shop.worker"}))
     assert next(n for n in closed["nodes"] if n["kind"] == "start")["label"] == "python -m shop.worker"

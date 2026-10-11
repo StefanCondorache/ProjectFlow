@@ -1,6 +1,8 @@
 import type { ElkNode } from "elkjs/lib/elk-api";
+import ELK from "elkjs/lib/elk.bundled.js";
 import { expect, it } from "vitest";
-import { place, roundedPath, toElk } from "./layout";
+import { isFrame, place, roundedPath, toElk } from "./layout";
+import { nodeSize } from "./measure";
 import type { FlowGraph } from "./types";
 
 const graph: FlowGraph = {
@@ -29,6 +31,7 @@ const sizing = {
 
 it("nests frame children under their parent and sizes only the leaves", () => {
   const elk = toElk(graph, sizing);
+  expect(elk.layoutOptions!["elk.hierarchyHandling"]).toBe("INCLUDE_CHILDREN");
   expect(elk.children!.map((c) => c.id)).toEqual(["s", "n1", "e"]);
   const group = elk.children![1];
   expect(group.children!.map((c) => c.id)).toEqual(["n1/s", "n1/n1", "n1/e"]);
@@ -92,4 +95,81 @@ it("roundedPath keeps straight runs straight and rounds the corners", () => {
 it("lays the flow out left to right unless asked for top-down", () => {
   expect(toElk(graph, sizing).layoutOptions!["elk.direction"]).toBe("RIGHT");
   expect(toElk(graph, sizing, "DOWN").layoutOptions!["elk.direction"]).toBe("DOWN");
+});
+
+it("keeps a collapsed folder as a sized leaf and an expanded folder as a compound frame", async () => {
+  const map: FlowGraph = {
+    root: "@project",
+    overview: { path: "", files: 6, total_files: 6, parsed_files: 0, relationships: 1, languages: {}, truncated: false },
+    nodes: [
+      { id: "dir:docs", kind: "folder", label: "docs", parent: null, detail: { files: 5 } },
+      { id: "dir:src", kind: "folder", label: "src", parent: null, detail: { container: true } },
+      { id: "file:src/app.ts", kind: "module", label: "app.ts", parent: "dir:src", detail: {} },
+    ],
+    edges: [{ source: "file:src/app.ts", target: "dir:docs", kind: "dependency", label: "", data: [] }],
+  };
+  expect(isFrame(map.nodes[0])).toBe(false);
+  expect(isFrame(map.nodes[1])).toBe(true);
+  const elk = toElk(map, { ...sizing, node: nodeSize });
+  expect(elk.layoutOptions!["elk.hierarchyHandling"]).toBe("INCLUDE_CHILDREN");
+  expect(elk.children![0]).toMatchObject({ width: 240, height: 90 });
+  expect(elk.children![0].children).toBeUndefined();
+  expect(elk.children![1].width).toBeUndefined();
+  expect(elk.children![1].children![0]).toMatchObject({ id: "file:src/app.ts", width: 240, height: 90 });
+  expect(isFrame(graph.nodes[1])).toBe(true);
+  expect(isFrame({ ...graph.nodes[1], kind: "file" })).toBe(true);
+  const result = await new ELK().layout(elk);
+  const frame = result.children!.find((node) => node.id === "dir:src")!;
+  expect(frame.children).toHaveLength(1);
+  expect(frame.width).toBeGreaterThan(frame.children![0].width!);
+  expect(frame.height).toBeGreaterThan(frame.children![0].height!);
+});
+
+it("reserves readable cards for every neutral file category", () => {
+  for (const kind of ["module", "config", "document", "asset", "external"] as const) {
+    expect(nodeSize({ id: kind, kind, label: "a-long-file-name.unknown", parent: null, detail: {} })).toEqual({ width: 240, height: 90 });
+  }
+});
+
+it("shows aggregate dependency counts even when the API omits a text label", () => {
+  const elk = toElk({ ...graph, edges: [{ source: "s", target: "e", label: "", kind: "dependency", data: [], count: 4, confidence: "inferred" }] }, sizing);
+  expect(elk.edges![0].labels).toEqual([{ text: "4 imports", width: 71, height: 16 }]);
+});
+
+it("packs connected and disconnected flat map cards into a readable landscape overview", async () => {
+  const map: FlowGraph = {
+    root: "@project",
+    overview: { path: "", files: 10, total_files: 10, parsed_files: 0, relationships: 3, languages: {}, truncated: false },
+    nodes: Array.from({ length: 10 }, (_, index) => ({ id: `file:${index}.ts`, kind: "module", label: `${index}.ts`, parent: null, detail: {} })),
+    edges: [[0, 1], [0, 2], [3, 4]].map(([source, target]) => ({ source: `file:${source}.ts`, target: `file:${target}.ts`, label: "", kind: "dependency", data: [] })),
+  };
+  const result = await new ELK().layout(toElk(map, { ...sizing, node: nodeSize }));
+  expect(result.children).toHaveLength(10);
+  expect(result.edges).toHaveLength(3);
+  const aspectRatio = result.width! / result.height!;
+  expect(aspectRatio).toBeGreaterThan(1);
+  expect(aspectRatio).toBeLessThan(2.5);
+});
+
+it("packs a large dependency-free expanded folder while keeping its cards inside the frame", async () => {
+  const map: FlowGraph = {
+    root: "@project",
+    overview: { path: "", files: 240, total_files: 240, parsed_files: 0, relationships: 0, languages: {}, truncated: true },
+    nodes: [
+      { id: "dir:wide", kind: "folder", label: "wide", parent: null, detail: { container: true, files: 240 } },
+      ...Array.from({ length: 199 }, (_, index) => ({ id: `file:wide/${index}.txt`, kind: "document" as const, label: `${index}.txt`, parent: "dir:wide", detail: {} })),
+    ],
+    edges: [],
+  };
+  const result = await new ELK().layout(toElk(map, { ...sizing, node: nodeSize }));
+  const frame = result.children![0];
+  expect(frame.children).toHaveLength(199);
+  expect(frame.width! / frame.height!).toBeGreaterThan(0.8);
+  expect(frame.width! / frame.height!).toBeLessThan(2.5);
+  for (const card of frame.children!) {
+    expect(card.x).toBeGreaterThanOrEqual(frame.x!);
+    expect(card.y).toBeGreaterThanOrEqual(frame.y!);
+    expect(card.x! + card.width!).toBeLessThanOrEqual(frame.x! + frame.width!);
+    expect(card.y! + card.height!).toBeLessThanOrEqual(frame.y! + frame.height!);
+  }
 });

@@ -25,6 +25,8 @@ const clamp = (value: number, lo: number, hi: number) => Math.max(lo, Math.min(h
 
 export function headerText(node: FlowNode): string {
   switch (node.kind) {
+    case "folder":
+      return `${node.label}  ${node.detail.files ?? 0} files`;
     case "group":
       return `${node.label}  ${node.detail.file ?? ""}`;
     case "file":
@@ -41,6 +43,13 @@ export function headerText(node: FlowNode): string {
 export function nodeSize(node: FlowNode): Size {
   const d = node.detail;
   switch (node.kind) {
+    case "folder":
+    case "module":
+    case "config":
+    case "document":
+    case "asset":
+    case "external":
+      return { width: 240, height: 90 };
     case "start":
     case "end":
       return d.inner

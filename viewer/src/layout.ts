@@ -9,6 +9,11 @@ import type { FlowEdge, FlowGraph, FlowNode } from "./types";
 
 export const FRAME_KINDS = new Set(["loop", "try", "handler", "group", "file"]);
 
+/** Folder cards become compound frames only when their children are visible. */
+export function isFrame(node: FlowNode): boolean {
+  return FRAME_KINDS.has(node.kind) || (node.kind === "folder" && node.detail.container === true);
+}
+
 export interface Size {
   width: number;
   height: number;
@@ -73,9 +78,12 @@ function frameOptions(headerWidth: number): LayoutOptions {
 }
 
 export function toElk(graph: FlowGraph, sizing: Sizing, direction: Direction = "RIGHT"): ElkNode {
+  // Maps can pack separate components when flat or dependency-free. Compound
+  // maps with dependencies and all flows retain routing across frame borders.
+  const hierarchy = graph.overview && (!graph.nodes.some(isFrame) || graph.edges.length === 0) ? "SEPARATE_CHILDREN" : "INCLUDE_CHILDREN";
   const root: ElkNode = {
     id: "__root",
-    layoutOptions: { ...ROOT_OPTIONS, "elk.direction": direction },
+    layoutOptions: { ...ROOT_OPTIONS, "elk.direction": direction, "elk.hierarchyHandling": hierarchy },
     children: [],
     edges: [],
   };
@@ -83,7 +91,7 @@ export function toElk(graph: FlowGraph, sizing: Sizing, direction: Direction = "
   for (const node of graph.nodes) {
     elkNodes.set(
       node.id,
-      FRAME_KINDS.has(node.kind)
+      isFrame(node)
         ? { id: node.id, children: [], layoutOptions: frameOptions(sizing.header(node)) }
         : { id: node.id, ...sizing.node(node) },
     );
@@ -92,14 +100,15 @@ export function toElk(graph: FlowGraph, sizing: Sizing, direction: Direction = "
     const parent = (node.parent && elkNodes.get(node.parent)) || root;
     parent.children!.push(elkNodes.get(node.id)!);
   }
-  root.edges = graph.edges.map(
-    (edge, i): ElkExtendedEdge => ({
+  root.edges = graph.edges.map((edge, i): ElkExtendedEdge => {
+    const label = edge.kind === "dependency" && (edge.count ?? 0) > 1 ? `${edge.count} imports` : edge.label;
+    return {
       id: `e${i}`,
       sources: [edge.source],
       targets: [edge.target],
-      labels: edge.label ? [{ text: edge.label, ...sizing.label(edge.label) }] : [],
-    }),
-  );
+      labels: label ? [{ text: label, ...sizing.label(label) }] : [],
+    };
+  });
   return root;
 }
 

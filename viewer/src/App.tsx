@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { api, readHash, writeHash, type ViewState } from "./api";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { api, readHash, toggleFolderExpansion, writeHash, type ViewState } from "./api";
 import { Details } from "./Details";
 import { Diagram, type TokenRun } from "./Diagram";
+import { Icon } from "./Icon";
+import { MapDetails } from "./MapDetails";
 import { layoutGraph } from "./elk";
 import type { Direction, Placed } from "./layout";
 import { Resizer } from "./Resizer";
@@ -29,8 +31,8 @@ interface SetupState {
 
 const sameSet = (a: string[], b: string[]) => a.length === b.length && [...a].sort().join(",") === [...b].sort().join(",");
 
-const LEFT = { initial: 290, min: 200, max: 560 };
-const RIGHT = { initial: 400, min: 300, max: 800 };
+const LEFT = { initial: 292, min: 240, max: 480 };
+const RIGHT = { initial: 380, min: 320, max: 640 };
 const clamp = (value: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, value));
 
 function stored<T extends string | number>(key: string, fallback: T): T {
@@ -42,8 +44,18 @@ function stored<T extends string | number>(key: string, fallback: T): T {
 export function App() {
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [view, setView] = useState<ViewState | null>(null);
+  const map = !view || view.mode === "map";
+  const supportsSimulation = Boolean(view && !map && !view.at && view.root.split("::")[0].endsWith(".py") && (project?.capabilities?.simulation_languages ?? ["python"]).includes("python"));
+  const currentView = useRef(view);
+  currentView.current = view;
   const [graph, setGraph] = useState<FlowGraph | null>(null);
-  const [placed, setPlaced] = useState<Placed | null>(null);
+  const [graphView, setGraphView] = useState<{ view: ViewState; key: string } | null>(null);
+  const [rendered, setRendered] = useState<{ placed: Placed; view: ViewState; key: string; direction: Direction } | null>(null);
+  const placed = rendered?.placed ?? null;
+  const [layingOut, setLayingOut] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const [desktop, setDesktop] = useState(() => window.matchMedia("(min-width: 761px)").matches);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia("(min-width: 761px)").matches);
   const [selected, setSelected] = useState<string | null>(null);
   const [anchor, setAnchor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -51,8 +63,8 @@ export function App() {
   const [fitSignal, setFitSignal] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [direction, setDirection] = useState<Direction>(() => stored<Direction>("direction", "RIGHT"));
-  const [leftWidth, setLeftWidth] = useState(() => stored("left", LEFT.initial));
-  const [rightWidth, setRightWidth] = useState(() => stored("right", RIGHT.initial));
+  const [leftWidth, setLeftWidth] = useState(() => clamp(stored("left", LEFT.initial) || LEFT.initial, LEFT.min, LEFT.max));
+  const [rightWidth, setRightWidth] = useState(() => clamp(stored("right", RIGHT.initial) || RIGHT.initial, RIGHT.min, RIGHT.max));
   const autoOpened = useRef(0);
   // Bumped by automatic opens so the diagram re-frames as for a new root.
   const [opening, setOpening] = useState(0);
@@ -63,22 +75,69 @@ export function App() {
   const [tab, setTab] = useState<"sim" | "details">("details");
   const [tips, setTips] = useState(() => stored("tips", "on") === "on");
   const dwell = useRef<number | undefined>(undefined);
+  const simulationRequest = useRef(0);
+  const setupRequest = useRef(0);
+  const navigationToggle = useRef<HTMLButtonElement>(null);
 
   useEffect(() => localStorage.setItem("flowmap.direction", direction), [direction]);
   useEffect(() => localStorage.setItem("flowmap.left", String(leftWidth)), [leftWidth]);
   useEffect(() => localStorage.setItem("flowmap.right", String(rightWidth)), [rightWidth]);
   useEffect(() => localStorage.setItem("flowmap.speed", String(speed)), [speed]);
 
+  useEffect(() => {
+    const desktop = window.matchMedia("(min-width: 761px)");
+    const onChange = (event: MediaQueryListEvent) => {
+      setDesktop(event.matches);
+      setSidebarOpen(event.matches);
+    };
+    desktop.addEventListener("change", onChange);
+    return () => desktop.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    if (desktop || !sidebarOpen) return;
+    const drawer = document.querySelector<HTMLElement>(".sidebar");
+    if (!drawer) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const controls = () => [...drawer.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), [tabindex='0']")].filter((element) => element.getClientRects().length > 0);
+    const first = drawer.querySelector<HTMLElement>(".navigation-close") ?? controls()[0];
+    const focusFrame = window.requestAnimationFrame(() => first?.focus({ preventScroll: true }));
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const items = controls();
+      const next = event.shiftKey ? items[items.length - 1] : items[0];
+      const edge = event.shiftKey ? items[0] : items[items.length - 1];
+      if (document.activeElement === edge || !drawer.contains(document.activeElement)) {
+        event.preventDefault();
+        next?.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener("keydown", trapFocus);
+    return () => {
+      document.removeEventListener("keydown", trapFocus);
+      window.cancelAnimationFrame(focusFrame);
+      const opener = previousFocus?.isConnected && previousFocus !== document.body ? previousFocus : navigationToggle.current;
+      opener?.focus({ preventScroll: true });
+    };
+  }, [desktop, sidebarOpen, project]);
+
   // A simulation belongs to the function it was started on; opening or
   // closing steps in it walks it again (see below).
-  const simKey = view ? [view.root, view.start ?? "", view.at ?? "", view.var ?? ""].join("|") : "";
+  const simKey = view ? JSON.stringify([view.mode ?? "flow", view.root, view.path ?? "", view.start ?? "", view.at ?? "", view.var ?? ""]) : "";
+  const currentSimKey = useRef(simKey);
+  currentSimKey.current = simKey;
   useEffect(() => {
+    simulationRequest.current += 1;
+    setupRequest.current += 1;
     window.clearTimeout(dwell.current);
     setSim(null);
     setSetupState(null);
+    setSimBusy(false);
   }, [simKey]);
 
   const go = useCallback((next: ViewState, mode: "push" | "replace", anchorId: string | null = null) => {
+    const before = currentView.current;
+    if (next.mode !== before?.mode || next.root !== before?.root || next.path !== before?.path) setSelected(null);
     writeHash(next, mode);
     setAnchor(anchorId);
     setView(next);
@@ -91,16 +150,14 @@ export function App() {
         setProject(p);
         const fromUrl = readHash();
         if (fromUrl) setView(fromUrl);
-        else if (p.entries.length) go({ root: p.entries[0].target, start: p.entries[0].label, expanded: [] }, "replace");
+        else go({ mode: "map", root: "@project", path: "", expanded: [] }, "replace");
       })
       .catch((e) => setError(String(e)));
     const onPop = () => {
-      const state = readHash();
-      if (state) {
-        setAnchor(null);
-        setSelected(null);
-        setView(state);
-      }
+      const state = readHash() ?? { mode: "map" as const, root: "@project", path: "", expanded: [] };
+      setAnchor(null);
+      setSelected(null);
+      setView(state);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -116,10 +173,11 @@ export function App() {
       .then((g) => {
         if (!live) return;
         setGraph(g);
+        setGraphView({ view, key: JSON.stringify([view.mode ?? "flow", view.root, view.path ?? "", opening, view.at ?? "", view.var ?? "", view.trailView ?? ""]) });
         setError(null);
         // A diagram that is just START -> one step -> END says nothing yet:
         // open that step straight away (a few levels at most).
-        if (view.at) return;
+        if (view.mode === "map" || view.at) return;
         if (view.expanded.length === 0) autoOpened.current = 0;
         const lone = loneStep(g, view.expanded[view.expanded.length - 1] ?? null);
         if (lone && autoOpened.current < 3 && view.expanded.length === autoOpened.current) {
@@ -133,19 +191,28 @@ export function App() {
     return () => {
       live = false;
     };
-  }, [view, go]);
+  }, [view, go, retry]);
 
   // Lay it out (again when the direction changes).
   useEffect(() => {
-    if (!graph) return;
+    if (!graph || !graphView) return;
     let live = true;
+    setLayingOut(true);
     layoutGraph(graph, direction)
-      .then((p) => live && setPlaced(p))
-      .catch((e) => live && setError(String(e)));
+      .then((p) => {
+        if (!live) return;
+        setRendered({ placed: p, view: graphView.view, key: `${graphView.key}|${direction}`, direction });
+      })
+      .catch((e) => live && setError(String(e)))
+      .finally(() => live && setLayingOut(false));
     return () => {
       live = false;
     };
-  }, [graph, direction]);
+  }, [graph, graphView, direction]);
+
+  useEffect(() => {
+    if (project) document.title = `${project.name} · Flowmap`;
+  }, [project]);
 
   const keys = useRef<(event: KeyboardEvent) => void>(() => undefined);
   useEffect(() => {
@@ -162,6 +229,10 @@ export function App() {
   const toggle = useCallback(
     (node: FlowNode) => {
       if (!view) return;
+      if (view.mode === "map") {
+        if (node.kind === "folder" && node.detail.expandable !== false) go({ ...view, expanded: toggleFolderExpansion(view.expanded, node.id) }, "replace", node.id);
+        return;
+      }
       const open = new Set(view.expanded);
       if (node.kind === "group") {
         for (const id of [...open]) if (id === node.id || id.startsWith(`${node.id}/`)) open.delete(id);
@@ -177,16 +248,24 @@ export function App() {
 
   const openEntry = (entry: Entry) => {
     setSelected(null);
+    if (window.matchMedia("(max-width: 760px)").matches) setSidebarOpen(false);
     go({ root: entry.target, start: entry.label, expanded: [] }, "push");
   };
 
   const enter = (target: string) => {
     setSelected(null);
+    if (window.matchMedia("(max-width: 760px)").matches) setSidebarOpen(false);
     go({ root: target, expanded: [] }, "push");
   };
 
+  const focusMap = (path: string) => {
+    setSelected(null);
+    if (window.matchMedia("(max-width: 760px)").matches) setSidebarOpen(false);
+    go({ mode: "map", root: "@project", path, expanded: [] }, "push");
+  };
+
   const follow = (at: string, variable: string) => {
-    if (!view) return;
+    if (!view || view.mode === "map") return;
     setSelected(null);
     go({ root: view.root, start: view.start, expanded: view.expanded, at, var: variable }, "push");
   };
@@ -205,7 +284,7 @@ export function App() {
 
   const openAll = () => {
     if (!graph || !view) return;
-    const more = graph.nodes.filter((n) => n.kind === "step" && n.detail.expandable).map((n) => n.id);
+    const more = graph.nodes.filter((n) => n.kind === (map ? "folder" : "step") && n.detail.expandable).map((n) => n.id);
     if (more.length) go({ ...view, expanded: [...new Set([...view.expanded, ...more])] }, "replace");
   };
 
@@ -227,61 +306,75 @@ export function App() {
   };
 
   const openSetup = (at: string | null, label: string) => {
-    if (!view || view.at) return;
+    if (!view || !supportsSimulation) return;
     const base = sim?.setup ?? NO_SETUP;
     const setup = { ...base, at, inputs: at === base.at ? base.inputs : {} };
+    const request = ++setupRequest.current;
     setSetupState({ setup, label, expects: null });
     setTab("sim");
     api
       .expects(view, at ?? "s")
-      .then((expects) => setSetupState((s) => (s && s.setup.at === at ? { ...s, expects } : s)))
-      .catch((e) => flash(`Could not look at the data there: ${e}`));
+      .then((expects) => {
+        if (request === setupRequest.current && simKey === currentSimKey.current) setSetupState((s) => (s ? { ...s, expects } : s));
+      })
+      .catch((e) => {
+        if (request === setupRequest.current && simKey === currentSimKey.current) flash(`Could not look at the data there: ${e}`);
+      });
   };
 
   const runSimulation = async (setup: SimSetup) => {
-    if (!view) return;
+    if (!view || !supportsSimulation) return;
+    const request = ++simulationRequest.current;
+    const active = () => request === simulationRequest.current && simKey === currentSimKey.current;
     setSimBusy(true);
     try {
       const data = await api.simulate(view, {}, setup);
+      if (!active()) return;
       setSim((old) => ({ run: (old?.run ?? 0) + 1, data, index: 0, playing: true, choices: {}, setup }));
       setSetupState(null);
       setTab("sim");
       syncExpanded(data);
     } catch (e) {
-      flash(`Could not simulate: ${e}`);
+      if (active()) flash(`Could not simulate: ${e}`);
     } finally {
-      setSimBusy(false);
+      if (active()) setSimBusy(false);
     }
   };
 
   /** Walk again with other data or answers, staying at the same frame. */
   const rerun = async (setup: SimSetup, choices: Record<string, string>, index: number, advance = false) => {
-    if (!view) return;
+    if (!view || !supportsSimulation) return;
+    const request = ++simulationRequest.current;
+    const active = () => request === simulationRequest.current && simKey === currentSimKey.current;
     setSimBusy(true);
     try {
       const data = await api.simulate(view, choices, setup);
+      if (!active()) return;
       const at = Math.max(0, Math.min(index + (advance ? 1 : 0), data.frames.length - 1));
       setSim((s) => (s ? { ...s, data, choices, setup, index: at, playing: advance || s.playing } : s));
       syncExpanded(data);
     } catch (e) {
-      flash(`Could not simulate: ${e}`);
+      if (active()) flash(`Could not simulate: ${e}`);
     } finally {
-      setSimBusy(false);
+      if (active()) setSimBusy(false);
     }
   };
 
   // Opening or closing a step while a run is on: walk the new diagram.
   const expandedKey = view ? [...view.expanded].sort().join(",") : "";
   useEffect(() => {
-    if (!sim || !view || view.at || sameSet(view.expanded, sim.data.expanded)) return;
+    if (!sim || !view || view.mode === "map" || view.at || sameSet(view.expanded, sim.data.expanded)) return;
     void rerun(sim.setup, sim.choices, sim.index);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expandedKey]);
 
   const stopSimulation = () => {
+    simulationRequest.current += 1;
+    setupRequest.current += 1;
     window.clearTimeout(dwell.current);
     setSim(null);
     setSetupState(null);
+    setSimBusy(false);
     if (!selected) setTab("details");
   };
 
@@ -315,11 +408,15 @@ export function App() {
   };
 
   keys.current = (event: KeyboardEvent) => {
+    if (event.defaultPrevented) return;
+    if (event.key === "Escape") {
+      setSelected(null);
+      if (window.matchMedia("(max-width: 760px)").matches) setSidebarOpen(false);
+    }
     const tag = (event.target as HTMLElement).tagName;
     if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || tag === "BUTTON") return;
     if (event.key === "f") setFitSignal((n) => n + 1);
-    if (event.key === "Escape") setSelected(null);
-    if (!sim) return;
+    if (!sim || map) return;
     if (event.key === " ") {
       event.preventDefault();
       if (sim.playing) {
@@ -334,7 +431,7 @@ export function App() {
   };
 
   const tokenRun: TokenRun | null = (() => {
-    if (!sim) return null;
+    if (!sim || map) return null;
     const frame = sim.data.frames[sim.index];
     if (!frame) return null;
     const walked = new Set<string>();
@@ -352,42 +449,62 @@ export function App() {
   })();
 
   const selectedNode = graph?.nodes.find((n) => n.id === selected) ?? null;
-  const title = view?.start ?? graph?.nodes.find((n) => n.kind === "start")?.label ?? "";
-  const simulating = sim !== null || setupState !== null;
+  const title = map ? (view?.path ? view.path.split("/").pop()! : "Project map") : view?.start ?? (graphView?.view === view ? graph?.nodes.find((n) => n.kind === "start")?.label : view?.root.split("::").slice(1).join("::")) ?? "";
+  const simulating = !map && (sim !== null || setupState !== null);
   const rightOpen = selectedNode !== null || simulating;
   const showing = simulating && (tab === "sim" || !selectedNode) ? "sim" : "details";
   const frameNode = sim ? (graph?.nodes.find((n) => n.id === sim.data.frames[sim.index]?.node) ?? null) : null;
-  const columns = [`${leftWidth}px`, "5px", "minmax(0, 1fr)", ...(rightOpen ? ["5px", `${rightWidth}px`] : [])].join(" ");
+  const diagramReady = Boolean(rendered && rendered.view === view && rendered.direction === direction);
+  const updating = busy || layingOut || Boolean(view && !diagramReady && !error);
+  const emptyMap = Boolean(map && diagramReady && graph?.nodes.length === 0);
+  const pathParts = (view?.path ?? "").split("/").filter(Boolean);
+  const overview = graphView?.view === view ? graph?.overview : undefined;
+  const summary = graph && graphView?.view === view ? {
+    steps: graph.nodes.filter((n) => ["step", "io", "use", "raise"].includes(n.kind)).length,
+    decisions: graph.nodes.filter((n) => n.kind === "decision").length,
+    opened: graph.nodes.filter((n) => n.kind === "group").length,
+  } : null;
 
   return (
-    <div className="app" style={{ gridTemplateColumns: columns }}>
+    <div className={`app${sidebarOpen ? " is-sidebar-open" : ""}${rightOpen ? " has-inspector" : ""}`} style={{ "--left-width": `${leftWidth}px`, "--right-width": `${rightWidth}px` } as CSSProperties}>
+      <button className="navigation-backdrop" tabIndex={-1} aria-label="Close project navigation" onClick={() => setSidebarOpen(false)} />
       {project ? (
-        <Sidebar project={project} current={view?.root ?? null} onOpen={openEntry} onFunction={enter} />
+        <Sidebar project={project} current={view?.root ?? null} onOpen={openEntry} onFunction={enter} map={map} path={view?.path} onMap={() => focusMap("")} onFile={focusMap} modal={!desktop && sidebarOpen} onClose={() => setSidebarOpen(false)} />
       ) : (
-        <aside className="sidebar" />
+        <aside className="sidebar sidebar-loading" aria-label="Loading project"><div className="brand">flowmap</div><div className="skeleton" /><div className="skeleton" /><div className="skeleton" /></aside>
       )}
       <Resizer
+        className="left-resizer"
         label="Resize the entry list"
         onDrag={(dx) => setLeftWidth((w) => clamp(w + dx, LEFT.min, LEFT.max))}
         onReset={() => setLeftWidth(LEFT.initial)}
       />
-      <main className="stage">
-        <div className="toolbar">
-          <button onClick={() => history.back()} title="Back to the previous diagram">
-            ←
-          </button>
-          <div className="crumb">
-            <code>{title}</code>
-            {view && !view.start && <span className="crumb-file">{view.root.split("::")[0]}</span>}
+      <main className="stage" inert={!desktop && sidebarOpen}>
+        <header className="workspace-header">
+          <div className="stage-heading">
+            <button ref={navigationToggle} className="icon-button navigation-toggle" onClick={() => setSidebarOpen((open) => !open)} aria-label="Toggle project navigation" aria-expanded={sidebarOpen} title="Toggle project navigation"><Icon name="panels" size={19} /></button>
+            <div className="heading-copy"><div className="eyebrow">{map ? "Project explorer" : view?.at ? "Data explorer" : "Flow explorer"}</div><h1 title={title || "Flowmap"}>{title || project?.name || "Your code, mapped out"}</h1></div>
+            <span className={`view-status${updating || !project ? " is-busy" : ""}${error ? " is-error" : ""}`} role="status"><span className="status-dot" />{error ? "Needs attention" : !project ? "Reading" : updating ? "Updating" : "Ready"}</span>
           </div>
-          <div className="spacer" />
-          {view?.at && view.var ? (
+          <div className="flow-context">
+            {map ? <nav className="map-breadcrumbs" aria-label="Map location">
+              <button onClick={() => focusMap("")} aria-current={pathParts.length === 0 ? "page" : undefined}>{project?.name ?? "Project"}</button>
+              {pathParts.map((part, i) => <span key={pathParts.slice(0, i + 1).join("/")}><span aria-hidden="true"> / </span><button onClick={() => focusMap(pathParts.slice(0, i + 1).join("/"))} aria-current={i === pathParts.length - 1 ? "page" : undefined}>{part}</button></span>)}
+            </nav> : <span className="crumb-file" title={view?.root.split("::")[0]}><Icon name="code" size={14} />{view?.root.split("::")[0] || "Reading your project"}</span>}
+            {map && overview ? <div className="flow-summary" aria-label="Map summary"><span><strong>{overview.files}</strong> files</span><span><strong>{overview.relationships}</strong> imports</span><span><strong>{overview.parsed_files}</strong> parsed</span></div> : !map && summary && <div className="flow-summary" aria-label="Diagram summary"><span><strong>{summary.steps}</strong> steps</span><span><strong>{summary.decisions}</strong> decisions</span><span><strong>{summary.opened}</strong> opened</span></div>}
+          </div>
+        </header>
+        <div className="toolbar" aria-label="Diagram controls">
+          <button className="icon-button" onClick={() => history.back()} title="Back to the previous diagram" aria-label="Back to the previous diagram"><Icon name="back" /></button>
+          {(!map || view?.path) && <button onClick={() => focusMap("")} title="Return to the full project map"><Icon name="panels" />{map ? "Back to project" : "Project map"}</button>}
+          {!map && view?.at && view.var ? (
             <div className="following">
               Following <code>{view.var.startsWith("$") ? "a call's result" : view.var}</code>
               {graph?.trail?.truncated && <span className="following-note"> (cut short: very long trail)</span>}
               <div className="segmented" role="group" aria-label="Show the data as">
                 <button
                   className={view.trailView !== "steps" ? "is-on" : ""}
+                  aria-pressed={view.trailView !== "steps"}
                   onClick={() => showTrailAs("journey")}
                   title="Every function the data passes through, grouped by file"
                 >
@@ -395,6 +512,7 @@ export function App() {
                 </button>
                 <button
                   className={view.trailView === "steps" ? "is-on" : ""}
+                  aria-pressed={view.trailView === "steps"}
                   onClick={() => showTrailAs("steps")}
                   title="Every step that touches the data"
                 >
@@ -405,55 +523,52 @@ export function App() {
             </div>
           ) : (
             <>
-              <button onClick={openAll} title="Open every step one level deeper">
-                Open all
+              <button onClick={openAll} disabled={!diagramReady || updating || emptyMap} title={map ? "Expand every visible folder one level deeper" : "Open every step one level deeper"}>
+                <Icon name="expand" /> <span>{map ? "Expand folders" : "Open all"}</span>
               </button>
-              <button onClick={() => view && go({ ...view, expanded: [] }, "replace")} disabled={!view?.expanded.length}>
-                Close all
+              <button onClick={() => view && go({ ...view, expanded: [] }, "replace")} disabled={!view?.expanded.length || !diagramReady || updating}>
+                <Icon name="collapse" /> <span>{map ? "Collapse folders" : "Close all"}</span>
               </button>
             </>
           )}
-          <button onClick={() => setTips((t) => !t)} title="How to use this view" aria-label="Help">
-            ?
+          <div className="spacer" />
+          <button className="icon-button" onClick={() => setTips((t) => !t)} title="How to use this view" aria-label="Help" aria-expanded={tips}>
+            <Icon name="help" />
           </button>
           <button
             onClick={() => setDirection((d) => (d === "RIGHT" ? "DOWN" : "RIGHT"))}
-            title={direction === "RIGHT" ? "Lay the flow out top to bottom" : "Lay the flow out left to right"}
+            title={direction === "RIGHT" ? "Arrange the diagram top to bottom" : "Arrange the diagram left to right"}
             aria-label="Switch layout direction"
+            disabled={!placed || updating}
           >
-            {direction === "RIGHT" ? "⇄" : "⇅"}
+            <Icon name="layout" /> <span>{direction === "RIGHT" ? "Horizontal" : "Vertical"}</span>
           </button>
-          <button onClick={copyMermaid} title="Copy this diagram as Mermaid text">
-            Copy Mermaid
+          <button onClick={copyMermaid} disabled={!diagramReady || updating} title="Copy this diagram as Mermaid text">
+            <Icon name="code" /> <span>Copy Mermaid</span>
           </button>
-          {!view?.at &&
+          {supportsSimulation &&
             (sim ? (
               <button className="primary" onClick={stopSimulation} title="Stop the simulation">
-                ■ Stop
+                <Icon name="stop" /> Stop
               </button>
             ) : (
               <button
                 className="primary"
                 onClick={() => openSetup(null, title)}
-                disabled={simBusy || !placed}
+                disabled={simBusy || !diagramReady || updating}
                 title="Send data through this diagram, step by step"
               >
-                ▶ Simulate
+                <Icon name="play" /> Simulate
               </button>
             ))}
         </div>
         {tips && (
           <div className="tips" role="note">
-            <span>
-              <b>+</b> opens a step in place
-            </span>
-            <span>
-              click a <u>data label</u> to follow that value through the code
-            </span>
-            <span>
-              <b>▶ Simulate</b> sends data through the diagram (space pauses, ← → step)
-            </span>
-            <span>drag the panel edges to resize · F fits · ⇄ turns the layout</span>
+            {map ? <><span><b>+</b> opens a folder in place</span><span>Select a file to see imports, source, and supported function flows</span><span>Arrows show imports; dashed links are inferred</span></> : <>
+              <span><b>+</b> opens a step in place</span>
+              <span>click a <u>data label</u> to follow that value through the code</span>
+              <span><b>▶ Simulate</b> sends data through the diagram (space pauses, ← → step)</span>
+            </>}
             <button
               onClick={() => {
                 setTips(false);
@@ -464,10 +579,11 @@ export function App() {
             </button>
           </div>
         )}
-        {placed && view && (
-          <Diagram
+        {map && overview?.truncated && <p className="map-notice" role="status">This map shows a limited number of items. Focus a folder or search for a file to explore a smaller area.</p>}
+        {placed && rendered && !emptyMap && (
+          <div className={`diagram-container${updating || error ? " is-updating" : ""}`} aria-busy={updating} inert={updating || Boolean(error)}><Diagram
             placed={placed}
-            rootKey={`${view.root}|${opening}|${view.at ?? ""}|${view.var ?? ""}|${view.trailView ?? ""}|${direction}`}
+            rootKey={rendered.key}
             anchor={anchor}
             fitSignal={fitSignal}
             selected={selected}
@@ -476,29 +592,31 @@ export function App() {
               if (id) setTab("details");
             }}
             onToggle={toggle}
-            direction={direction}
-            onFollow={view.at && view.trailView !== "steps" ? undefined : follow}
-            following={Boolean(view.at)}
+            direction={rendered.direction}
+            map={rendered.view.mode === "map"}
+            onFollow={rendered.view.mode === "map" || (rendered.view.at && rendered.view.trailView !== "steps") ? undefined : follow}
+            following={rendered.view.mode !== "map" && Boolean(rendered.view.at)}
             run={tokenRun}
-          />
+          /></div>
         )}
-        {!placed && !error && (
-          <div className="empty">{project && !project.entries.length ? "No entry points found in this folder." : "Reading the project…"}</div>
+        {(!placed || emptyMap) && (
+          <div className="diagram-container">{!error && <div className="empty" role="status"><div className="empty-icon"><Icon name={map ? "panels" : "flow"} size={30} /></div><h2>{emptyMap ? (view?.path ? "No files in this area" : "No project files found") : "Mapping your project"}</h2><p>{emptyMap ? "This area contains no inventoried files. Generated and ignored folders are excluded from the map." : map ? "Finding the files, folders, and dependencies in your project." : "Finding the steps, decisions, and data that connect your code."}</p>{!emptyMap && <span className="loading-dots" aria-hidden="true"><i /><i /><i /></span>}</div>}</div>
         )}
-        {error && <div className="error-banner">{error}</div>}
-        {busy && placed && <div className="busy">Laying out…</div>}
-        <Legend />
-        {toast && <div className="toast">{toast}</div>}
+        {error && <div className="error-banner" role="alert"><strong>Unable to load this view</strong><p>{error}</p><button onClick={() => project ? setRetry((n) => n + 1) : window.location.reload()}>Try again</button></div>}
+        {updating && placed && !error && <div className="busy" role="status"><span className="status-dot" />{layingOut ? "Arranging the diagram…" : map ? "Loading the map…" : "Loading the flow…"}</div>}
+        <footer className="stage-footer"><Legend map={map} /><span className="canvas-hint">Drag to pan <span>·</span> <kbd>F</kbd> to fit</span></footer>
+        {toast && <div className="toast" role="status"><Icon name="check" />{toast}</div>}
       </main>
       {rightOpen && (
         <Resizer
+          className="right-resizer"
           label="Resize the side panel"
           onDrag={(dx) => setRightWidth((w) => clamp(w - dx, RIGHT.min, RIGHT.max))}
           onReset={() => setRightWidth(RIGHT.initial)}
         />
       )}
       {rightOpen && (
-        <aside className="inspector">
+        <aside className="inspector" aria-label={showing === "sim" ? "Simulation inspector" : map ? "Map inspector" : "Step inspector"} inert={!desktop && sidebarOpen}>
           {simulating && (
             <div className="tabs" role="tablist">
               <button role="tab" aria-selected={showing === "sim"} className={showing === "sim" ? "is-on" : ""} onClick={() => setTab("sim")}>
@@ -528,7 +646,12 @@ export function App() {
               setup={setupState.setup}
               busy={simBusy}
               onRun={runSimulation}
-              onCancel={() => setSetupState(null)}
+              onCancel={() => {
+                setupRequest.current += 1;
+                simulationRequest.current += 1;
+                setSimBusy(false);
+                setSetupState(null);
+              }}
             />
           ) : showing === "sim" && sim ? (
             <SimPanel
@@ -559,13 +682,13 @@ export function App() {
             />
           ) : (
             selectedNode && (
-              <Details
+              map && graph ? <MapDetails node={selectedNode} graph={graph} onToggle={toggle} onFocus={focusMap} onEnter={enter} onClose={() => setSelected(null)} /> : <Details
                 node={selectedNode}
                 following={Boolean(view?.at)}
                 onToggle={toggle}
                 onEnter={enter}
                 onFollow={follow}
-                onSimulateFrom={view?.at ? undefined : (node) => openSetup(node.id === "s" ? null : node.id, node.label)}
+                onSimulateFrom={!supportsSimulation ? undefined : (node) => openSetup(node.id === "s" ? null : node.id, node.label)}
                 onClose={() => setSelected(null)}
               />
             )
@@ -582,7 +705,13 @@ function loneStep(graph: FlowGraph, parent: string | null): FlowNode | null {
   return inside.length === 1 && inside[0].kind === "step" && inside[0].detail.expandable ? inside[0] : null;
 }
 
-function Legend() {
+function Legend({ map }: { map: boolean }) {
+  if (map) return <div className="legend" aria-label="Map legend">
+    <span className="legend-item"><i className="swatch swatch-folder" /> folder (+ expands)</span>
+    <span className="legend-item"><i className="swatch swatch-step" /> project file</span>
+    <span className="legend-item"><i className="swatch swatch-dependency" /> verified import</span>
+    <span className="legend-item"><i className="swatch swatch-inferred" /> inferred import</span>
+  </div>;
   return (
     <div className="legend" aria-label="Legend">
       <span className="legend-item">

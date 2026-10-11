@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from flowmap.discover import discover_files
+from flowmap.inventory import Inventory, build_inventory, contained_path
 from flowmap.entries import Entry, find_commands, merge_entries
 from flowmap.ir import ClassDef, Function, Module
 from flowmap.lang import adapters
@@ -19,6 +19,8 @@ class Project:
     classes: dict[str, ClassDef]
     entries: list[Entry] = field(default_factory=list)
     resolvers: dict[str, object] = field(default_factory=dict)  # language -> its linker, for type questions
+    inventory: Inventory = field(default_factory=Inventory)
+    relationships: list = field(default_factory=list)
 
     @property
     def name(self) -> str:
@@ -27,15 +29,22 @@ class Project:
 
 def load_project(root: str | Path) -> Project:
     root = Path(root).resolve()
+    if not root.is_dir():
+        raise ValueError(f"not a project folder: {root}")
+    inventory = build_inventory(root)
     langs = adapters()
     by_ext = {ext: adapter for adapter in langs for ext in adapter.extensions}
     modules: dict[str, Module] = {}
-    for rel in discover_files(root, extensions=tuple(by_ext)):
-        try:
-            source = (root / rel).read_bytes()
-        except OSError:
+    for rel, item in inventory.files.items():
+        adapter = by_ext.get(Path(rel).suffix)
+        if adapter is None:
             continue
-        modules[rel] = by_ext[Path(rel).suffix].extract(rel, source)
+        try:
+            source = contained_path(root, rel).read_bytes()
+        except (OSError, ValueError):
+            continue
+        modules[rel] = adapter.extract(rel, source)
+        item.analysis = "semantic"
     commands = find_commands(root)
     candidates: list[Entry] = []
     resolvers: dict[str, object] = {}
@@ -45,4 +54,8 @@ def load_project(root: str | Path) -> Project:
         candidates += adapter.entries(root, own, commands)
     functions = {fid: fn for m in modules.values() for fid, fn in m.functions.items()}
     classes = {cid: c for m in modules.values() for cid, c in m.classes.items()}
-    return Project(root, modules, functions, classes, merge_entries(candidates, functions), resolvers)
+    project = Project(root, modules, functions, classes, merge_entries(candidates, functions), resolvers, inventory)
+    from flowmap.overview import extract_relationships
+
+    project.relationships = extract_relationships(project)
+    return project
