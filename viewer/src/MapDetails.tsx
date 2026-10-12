@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, languageName } from "./api";
 import type { FlowGraph, FlowNode, SourceLines } from "./types";
 
@@ -6,7 +6,8 @@ interface Props {
   node: FlowNode;
   graph: FlowGraph;
   onToggle: (node: FlowNode) => void;
-  onFocus: (path: string) => void;
+  sourceLine?: number;
+  onFocus: (path: string, line?: number) => void;
   onEnter: (id: string) => void;
   onClose: () => void;
 }
@@ -16,9 +17,10 @@ const ANALYSIS: Record<string, string> = { imports: "Inferred imports", structur
 const number = new Intl.NumberFormat();
 
 /** A bounded preview uses the inventory endpoint, including non-semantic text files. */
-export function requestMapSource(file: string, onResult: (source: SourceLines) => void, onError: () => void): () => void {
+export function requestMapSource(file: string, onResult: (source: SourceLines) => void, onError: () => void, line?: number): () => void {
   let live = true;
-  api.mapSource(file, 1, 60).then(
+  const { start, end } = previewWindow(line);
+  api.mapSource(file, start, end).then(
     (source) => live && onResult(source),
     () => live && onError(),
   );
@@ -26,28 +28,49 @@ export function requestMapSource(file: string, onResult: (source: SourceLines) =
 }
 
 interface SourceState {
-  path: string;
+  location: string;
   status: "pending" | "ready" | "error";
   source: SourceLines | null;
 }
 
-export function MapDetails({ node, graph, onToggle, onFocus, onEnter, onClose }: Props) {
+function previewWindow(line?: number): { start: number; end: number; line?: number } {
+  const cited = line !== undefined && Number.isSafeInteger(line) && line > 0 ? line : undefined;
+  const start = cited === undefined ? 1 : Math.max(1, cited - 12);
+  return { start, end: Math.min(Number.MAX_SAFE_INTEGER, start + 59), line: cited };
+}
+
+/** Actual preview markup is shared so a cited row remains accessible and visible. */
+export function MapSourcePreview({ source, sourceLine }: { source: SourceLines; sourceLine?: number }) {
+  const citedRow = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (sourceLine !== undefined) citedRow.current?.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
+  }, [source.file, source.start, source.lines, sourceLine]);
+  return <pre className="source" aria-label={`Source from ${source.file}`}><code>{source.lines.map((text, i) => {
+    const line = source.start + i;
+    const cited = line === sourceLine;
+    return <span className={`line${cited ? " is-cited" : ""}`} key={line} ref={cited ? citedRow : undefined} aria-label={cited ? `Cited line ${line}` : undefined} aria-current={cited ? "location" : undefined}><span className="ln">{line}</span>{text || " "}</span>;
+  })}</code></pre>;
+}
+
+export function MapDetails({ node, graph, sourceLine, onToggle, onFocus, onEnter, onClose }: Props) {
   const d = node.detail;
   const path = d.path;
   const readable = Boolean(path && d.readable && node.kind !== "folder" && node.kind !== "external");
-  const sourceKey = readable ? path! : "";
-  const [sourceState, setSourceState] = useState<SourceState>({ path: "", status: "pending", source: null });
+  const preview = previewWindow(sourceLine);
+  const sourceKey = readable ? JSON.stringify([path, preview.start, preview.end]) : "";
+  const [sourceState, setSourceState] = useState<SourceState>({ location: "", status: "pending", source: null });
   const [attempt, setAttempt] = useState(0);
-  const source = sourceState.path === sourceKey ? sourceState.source : null;
-  const status = sourceState.path === sourceKey ? sourceState.status : "pending";
+  const source = sourceState.location === sourceKey ? sourceState.source : null;
+  const status = sourceState.location === sourceKey ? sourceState.status : "pending";
 
   useEffect(() => {
-    setSourceState({ path: sourceKey, status: "pending", source: null });
+    setSourceState({ location: sourceKey, status: "pending", source: null });
     if (!sourceKey) return;
     return requestMapSource(
-      sourceKey,
-      (source) => setSourceState({ path: sourceKey, status: "ready", source }),
-      () => setSourceState({ path: sourceKey, status: "error", source: null }),
+      path!,
+      (source) => setSourceState({ location: sourceKey, status: "ready", source }),
+      () => setSourceState({ location: sourceKey, status: "error", source: null }),
+      preview.line,
     );
   }, [sourceKey, attempt]);
 
@@ -93,8 +116,8 @@ export function MapDetails({ node, graph, onToggle, onFocus, onEnter, onClose }:
         </section>
       )}
       <section className="detail-section">
-        <h3>Dependencies <span className="count">{relationships.length}</span></h3>
-        {relationships.length === 0 ? <p className="details-doc">No observed imports connect this visible area.</p> : (
+        <h3>Visible connections <span className="count">{relationships.length}</span></h3>
+        {relationships.length === 0 ? <p className="details-doc">No connections are drawn for this visible area. Relationships within a collapsed folder can be folded; expand or browse the folder to explore its files.</p> : (
           <ul className="map-relationships">
             {relationships.map((edge, i) => {
               const outgoing = edge.source === node.id;
@@ -106,7 +129,7 @@ export function MapDetails({ node, graph, onToggle, onFocus, onEnter, onClose }:
                   {(edge.count ?? 1) > 1 && <span className="dependency-count">{number.format(edge.count!)} imports</span>}
                   {edge.evidence && edge.evidence.length > 0 && (
                     <ul className="map-evidence">{edge.evidence.map((evidence, index) => <li key={`${evidence.file}:${evidence.line}:${index}`}>
-                      <button className="link" onClick={() => onFocus(evidence.file)} title="Focus this source file">{evidence.file}:{evidence.line}</button>
+                      <button className="link" onClick={() => onFocus(evidence.file, evidence.line)} title={`Open ${evidence.file} at line ${evidence.line}`}>{evidence.file}:{evidence.line}</button>
                       <code>{evidence.text}</code>
                     </li>)}</ul>
                   )}
@@ -118,11 +141,11 @@ export function MapDetails({ node, graph, onToggle, onFocus, onEnter, onClose }:
       </section>
       {readable && (
         <section className="detail-section">
-          <div className="source-head"><h3>Source preview</h3><code title={path}>{path} · first 60 lines</code></div>
+          <div className="source-head"><h3>Source preview{preview.line !== undefined && <span className="source-citation">Cited line {preview.line}</span>}</h3><code title={path}>{path} · {preview.line === undefined ? "first 60 lines" : `lines ${preview.start}–${preview.end}`}</code></div>
           {status === "pending" && <p className="source-status" role="status">Loading source…</p>}
           {status === "error" && <p className="source-status is-error" role="status">Source could not be loaded. <button className="link" onClick={() => setAttempt((value) => value + 1)}>Retry</button></p>}
           {source && source.lines.length === 0 && <p className="source-status">No source lines available.</p>}
-          {source && source.lines.length > 0 && <pre className="source" aria-label={`Source from ${source.file}`}><code>{source.lines.map((line, i) => <span className="line" key={source.start + i}><span className="ln">{source.start + i}</span>{line || " "}</span>)}</code></pre>}
+          {source && source.lines.length > 0 && <MapSourcePreview source={source} sourceLine={preview.line} />}
         </section>
       )}
     </section>

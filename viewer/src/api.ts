@@ -1,11 +1,13 @@
 import type { Expects, SimSetup, Simulation } from "./sim";
-import type { FlowGraph, MapSearchResult, ProjectInfo, SourceLines } from "./types";
+import type { FlowGraph, MapChildrenPage, MapSearchResult, ProjectInfo, SourceLines } from "./types";
 
 export interface ViewState {
   root: string;
   /** Project structure is separate from function execution and data trails. */
   mode?: "map";
   path?: string;
+  /** An optional cited source location in project map mode. */
+  line?: number;
   start?: string;
   expanded: string[];
   /** When set, the diagram follows one piece of data: variable ``var`` from node ``at``. */
@@ -71,6 +73,8 @@ export const api = {
   project: () => get<ProjectInfo>("api/project"),
   search: (q: string) => get<SearchHit[]>(`api/search?${new URLSearchParams({ q })}`),
   mapSearch: (q: string) => get<MapSearchResult[]>(`api/map-search?${new URLSearchParams({ q })}`),
+  mapChildren: (path: string, offset = 0, limit = 40) =>
+    get<MapChildrenPage>(`api/map-children?${new URLSearchParams({ path, offset: String(offset), limit: String(limit) })}`),
   flow: (view: ViewState) => get<FlowGraph>(view.mode === "map" ? `api/overview?${mapQuery(view)}` : `api/${view.at ? "trail" : "flow"}?${flowQuery(view)}`),
   source: (file: string, start: number, end: number) =>
     get<SourceLines>(`api/source?${new URLSearchParams({ file, start: String(start), end: String(end) })}`),
@@ -104,7 +108,15 @@ export const api = {
 export function readHash(): ViewState | null {
   const params = new URLSearchParams(location.hash.slice(1));
   const expanded = (params.get("expand") ?? "").split(",").filter(Boolean);
-  if (params.get("mode") === "map") return { mode: "map", root: "@project", path: params.get("path") ?? "", expanded: params.has("open") ? params.getAll("open").filter(Boolean) : expanded };
+  if (params.get("mode") === "map") {
+    const rawLine = params.get("line") ?? "";
+    const line = /^\d+$/.test(rawLine) ? Number(rawLine) : NaN;
+    return {
+      mode: "map", root: "@project", path: params.get("path") ?? "",
+      expanded: params.has("open") ? params.getAll("open").filter(Boolean) : expanded,
+      ...(Number.isSafeInteger(line) && line > 0 ? { line } : {}),
+    };
+  }
   const root = params.get("root");
   if (!root) return null;
   return {
@@ -122,6 +134,7 @@ export function writeHash(view: ViewState, mode: "push" | "replace"): void {
   if (view.mode === "map") {
     params.set("mode", "map");
     if (view.path) params.set("path", view.path);
+    if (view.line !== undefined && Number.isSafeInteger(view.line) && view.line > 0) params.set("line", String(view.line));
   } else if (view.start) params.set("start", view.start);
   if (view.mode === "map") {
     for (const id of view.expanded) params.append("open", id);

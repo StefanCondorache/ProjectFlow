@@ -3,8 +3,13 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { api, readHash, toggleFolderExpansion, writeHash, type ViewState } from "./api";
 import { Sidebar, requestMapSearch } from "./Sidebar";
-import { MapDetails, requestMapSource } from "./MapDetails";
+import { MapDetails, MapSourcePreview, requestMapSource } from "./MapDetails";
+import { focusedMapFile } from "./App";
 import type { FlowGraph, FlowNode, MapSearchResult, ProjectInfo, SourceLines } from "./types";
+
+// The selection helper does not lay out graphs; importing App otherwise creates
+// the browser-only ELK worker, which is unavailable in the Node test runner.
+vi.mock("./elk", () => ({ layoutGraph: () => Promise.reject(new Error("Unexpected layout in source-navigation unit test")) }));
 
 beforeEach(() => {
   const location = { hash: "" };
@@ -22,6 +27,18 @@ afterEach(() => {
 });
 
 describe("map navigation", () => {
+  it("selects a bookmarked file only from the graph for the active map view", () => {
+    const view: ViewState = { mode: "map", root: "@project", path: "src/订单.ts", expanded: [] };
+    const node: FlowNode = { id: "file:src/订单.ts", kind: "module", label: "订单.ts", parent: null, detail: { path: "src/订单.ts" } };
+    const graph: FlowGraph = { root: "@project", nodes: [node], edges: [], overview: { path: "src/订单.ts", files: 1, total_files: 1, parsed_files: 0, relationships: 0, languages: { typescript: 1 }, truncated: false } };
+    expect(focusedMapFile(graph, view, view)).toBe("file:src/订单.ts");
+    expect(focusedMapFile(graph, view, { ...view })).toBeNull();
+    expect(focusedMapFile({ ...graph, overview: { ...graph.overview!, path: "old.ts" } }, view, view)).toBeNull();
+    expect(focusedMapFile(graph, { root: "app.py::main", expanded: [] }, view)).toBeNull();
+    const folder: ViewState = { ...view, path: "src" };
+    expect(focusedMapFile({ ...graph, overview: { ...graph.overview!, path: "src" } }, folder, folder)).toBeNull();
+  });
+
   it("collapses a folder and its expanded descendants without closing a similarly named sibling", () => {
     expect(toggleFolderExpansion(["dir:src", "dir:src/util", "dir:src/util/nested", "dir:src-other"], "dir:src")).toEqual(["dir:src-other"]);
     expect(toggleFolderExpansion(["dir:src-other"], "dir:src")).toEqual(["dir:src-other", "dir:src"]);
@@ -66,6 +83,58 @@ describe("map navigation", () => {
 });
 
 describe("map inspector", () => {
+  it("requests sixty source lines around a cited line while retaining the ordinary preview", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => { requested.push(url); return new Response(JSON.stringify({ file: "src/a.ts", start: 138, lines: [] })); });
+    requestMapSource("src/a.ts", () => undefined, () => undefined, 150);
+    requestMapSource("src/a.ts", () => undefined, () => undefined);
+    await vi.waitFor(() => expect(requested).toEqual([
+      "api/map-source?file=src%2Fa.ts&start=138&end=197",
+      "api/map-source?file=src%2Fa.ts&start=1&end=60",
+    ]));
+  });
+
+  it("does not publish older source responses when the cited line or path changes", async () => {
+    const complete: ((response: Response) => void)[] = [];
+    vi.stubGlobal("fetch", () => new Promise<Response>((resolve) => complete.push(resolve)));
+    const displayed: SourceLines[] = [];
+    const failed = vi.fn();
+    const oldLine = requestMapSource("src/a.ts", (source) => displayed.push(source), failed, 150);
+    oldLine();
+    const oldPath = requestMapSource("src/a.ts", (source) => displayed.push(source), failed, 300);
+    oldPath();
+    requestMapSource("lib/b.ts", (source) => displayed.push(source), failed, 5);
+    const current = { file: "lib/b.ts", start: 1, lines: ["current"] };
+    complete[2](new Response(JSON.stringify(current)));
+    complete[1](new Response(JSON.stringify({ file: "src/a.ts", start: 288, lines: ["old line"] })));
+    complete[0](new Response("unavailable", { status: 404 }));
+    await vi.waitFor(() => expect(displayed).toEqual([current]));
+    expect(failed).not.toHaveBeenCalled();
+  });
+
+  it("labels cited source windows and highlights the actual cited line accessibly", () => {
+    const source: SourceLines = { file: "src/a.ts", start: 149, lines: ["before", "import './value'", "after"] };
+    const html = renderToStaticMarkup(createElement(MapSourcePreview, { source, sourceLine: 150 }));
+    expect(html).toContain('class="line is-cited"');
+    expect(html).toContain('aria-label="Cited line 150"');
+    expect(html).toContain('aria-current="location"');
+    expect(html).toContain("import &#x27;./value&#x27;");
+    const node: FlowNode = { id: "file:src/a.ts", kind: "module", label: "a.ts", parent: null, detail: { path: "src/a.ts", readable: true } };
+    const graph: FlowGraph = { root: "@project", nodes: [node], edges: [] };
+    const details = renderToStaticMarkup(createElement(MapDetails, { node, graph, sourceLine: 150, onToggle: () => undefined, onFocus: () => undefined, onEnter: () => undefined, onClose: () => undefined }));
+    expect(details).toContain("Cited line 150");
+    expect(details).toContain("138–197");
+    expect(details).not.toContain("first 60 lines");
+  });
+
+  it("describes visible connections separately from imports folded inside an area", () => {
+    const node: FlowNode = { id: "dir:src", kind: "folder", label: "src", parent: null, detail: { path: "src" } };
+    const graph: FlowGraph = { root: "@project", nodes: [node], edges: [] };
+    const html = renderToStaticMarkup(createElement(MapDetails, { node, graph, onToggle: () => undefined, onFocus: () => undefined, onEnter: () => undefined, onClose: () => undefined }));
+    expect(html).toContain("Visible connections");
+    expect(html).toContain("Relationships within a collapsed folder can be folded");
+  });
+
   it("keeps focus available without offering collapse for a fixed focused namespace frame", () => {
     const node: FlowNode = { id: "dir:pkg", kind: "folder", label: "pkg", parent: null, detail: { path: "pkg", files: 1, container: true, expanded: true, expandable: false } };
     const graph: FlowGraph = { root: "@project", nodes: [node], edges: [] };

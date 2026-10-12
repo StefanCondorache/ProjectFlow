@@ -35,6 +35,18 @@ const LEFT = { initial: 292, min: 240, max: 480 };
 const RIGHT = { initial: 380, min: 320, max: 640 };
 const clamp = (value: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, value));
 
+/** Resolve a focused file only after its own map request has arrived. */
+export function focusedMapFile(graph: FlowGraph | null, view: ViewState | null, graphView: ViewState | null): string | null {
+  if (!graph || !view || view.mode !== "map" || !view.path || graphView !== view || graph.root !== "@project" || graph.overview?.path !== view.path) return null;
+  const id = `file:${view.path}`;
+  const node = graph.nodes.find((item) => item.id === id && item.detail.path === view.path && item.kind !== "folder" && item.kind !== "external");
+  return node?.id ?? null;
+}
+
+function mapFocusKey(view: ViewState | null): string | null {
+  return view?.mode === "map" && view.path ? JSON.stringify([view.root, view.path, view.line ?? null]) : null;
+}
+
 function stored<T extends string | number>(key: string, fallback: T): T {
   const value = localStorage.getItem(`flowmap.${key}`);
   if (value === null) return fallback;
@@ -57,6 +69,9 @@ export function App() {
   const [desktop, setDesktop] = useState(() => window.matchMedia("(min-width: 761px)").matches);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia("(min-width: 761px)").matches);
   const [selected, setSelected] = useState<string | null>(null);
+  // A navigation intent is consumed once; layout or browsing updates must not
+  // reopen an inspector the user has closed.
+  const pendingMapSelection = useRef<string | null>(null);
   const [anchor, setAnchor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -137,7 +152,11 @@ export function App() {
 
   const go = useCallback((next: ViewState, mode: "push" | "replace", anchorId: string | null = null) => {
     const before = currentView.current;
-    if (next.mode !== before?.mode || next.root !== before?.root || next.path !== before?.path) setSelected(null);
+    if (next.mode !== before?.mode || next.root !== before?.root || next.path !== before?.path || next.line !== before?.line) {
+      setSelected(null);
+      pendingMapSelection.current = mapFocusKey(next);
+    }
+    currentView.current = next;
     writeHash(next, mode);
     setAnchor(anchorId);
     setView(next);
@@ -149,7 +168,7 @@ export function App() {
       .then((p) => {
         setProject(p);
         const fromUrl = readHash();
-        if (fromUrl) setView(fromUrl);
+        if (fromUrl) go(fromUrl, "replace");
         else go({ mode: "map", root: "@project", path: "", expanded: [] }, "replace");
       })
       .catch((e) => setError(String(e)));
@@ -157,6 +176,8 @@ export function App() {
       const state = readHash() ?? { mode: "map" as const, root: "@project", path: "", expanded: [] };
       setAnchor(null);
       setSelected(null);
+      pendingMapSelection.current = mapFocusKey(state);
+      currentView.current = state;
       setView(state);
     };
     window.addEventListener("popstate", onPop);
@@ -167,14 +188,21 @@ export function App() {
   useEffect(() => {
     if (!view) return;
     let live = true;
+    const active = () => live && currentView.current === view;
     setBusy(true);
     api
       .flow(view)
       .then((g) => {
-        if (!live) return;
+        if (!active()) return;
         setGraph(g);
         setGraphView({ view, key: JSON.stringify([view.mode ?? "flow", view.root, view.path ?? "", opening, view.at ?? "", view.var ?? "", view.trailView ?? ""]) });
         setError(null);
+        if (pendingMapSelection.current !== null && pendingMapSelection.current === mapFocusKey(view)) {
+          const file = focusedMapFile(g, view, view);
+          pendingMapSelection.current = null;
+          setSelected(file);
+          if (file) setTab("details");
+        }
         // A diagram that is just START -> one step -> END says nothing yet:
         // open that step straight away (a few levels at most).
         if (view.mode === "map" || view.at) return;
@@ -186,8 +214,8 @@ export function App() {
           go({ ...view, expanded: [...view.expanded, lone.id] }, "replace");
         }
       })
-      .catch((e) => live && setError(String(e)))
-      .finally(() => live && setBusy(false));
+      .catch((e) => active() && setError(String(e)))
+      .finally(() => active() && setBusy(false));
     return () => {
       live = false;
     };
@@ -258,10 +286,17 @@ export function App() {
     go({ root: target, expanded: [] }, "push");
   };
 
-  const focusMap = (path: string) => {
+  const focusMap = (path: string, line?: number) => {
+    const next: ViewState = { mode: "map", root: "@project", path, expanded: [], ...(line === undefined ? {} : { line }) };
+    pendingMapSelection.current = mapFocusKey(next);
     setSelected(null);
     if (window.matchMedia("(max-width: 760px)").matches) setSidebarOpen(false);
-    go({ mode: "map", root: "@project", path, expanded: [] }, "push");
+    go(next, "push");
+  };
+
+  const closeDetails = () => {
+    pendingMapSelection.current = null;
+    setSelected(null);
   };
 
   const follow = (at: string, variable: string) => {
@@ -410,7 +445,7 @@ export function App() {
   keys.current = (event: KeyboardEvent) => {
     if (event.defaultPrevented) return;
     if (event.key === "Escape") {
-      setSelected(null);
+      closeDetails();
       if (window.matchMedia("(max-width: 760px)").matches) setSidebarOpen(false);
     }
     const tag = (event.target as HTMLElement).tagName;
@@ -448,7 +483,7 @@ export function App() {
     };
   })();
 
-  const selectedNode = graph?.nodes.find((n) => n.id === selected) ?? null;
+  const selectedNode = map && graphView?.view !== view ? null : graph?.nodes.find((n) => n.id === selected) ?? null;
   const title = map ? (view?.path ? view.path.split("/").pop()! : "Project map") : view?.start ?? (graphView?.view === view ? graph?.nodes.find((n) => n.kind === "start")?.label : view?.root.split("::").slice(1).join("::")) ?? "";
   const simulating = !map && (sim !== null || setupState !== null);
   const rightOpen = selectedNode !== null || simulating;
@@ -491,7 +526,7 @@ export function App() {
               <button onClick={() => focusMap("")} aria-current={pathParts.length === 0 ? "page" : undefined}>{project?.name ?? "Project"}</button>
               {pathParts.map((part, i) => <span key={pathParts.slice(0, i + 1).join("/")}><span aria-hidden="true"> / </span><button onClick={() => focusMap(pathParts.slice(0, i + 1).join("/"))} aria-current={i === pathParts.length - 1 ? "page" : undefined}>{part}</button></span>)}
             </nav> : <span className="crumb-file" title={view?.root.split("::")[0]}><Icon name="code" size={14} />{view?.root.split("::")[0] || "Reading your project"}</span>}
-            {map && overview ? <div className="flow-summary" aria-label="Map summary"><span><strong>{overview.files}</strong> files</span><span><strong>{overview.relationships}</strong> imports</span><span><strong>{overview.parsed_files}</strong> parsed</span></div> : !map && summary && <div className="flow-summary" aria-label="Diagram summary"><span><strong>{summary.steps}</strong> steps</span><span><strong>{summary.decisions}</strong> decisions</span><span><strong>{summary.opened}</strong> opened</span></div>}
+            {map && overview ? <div className="flow-summary" aria-label="Map summary"><span><strong>{overview.files}</strong> files</span><span><strong>{overview.relationships}</strong> observed imports</span><span><strong>{overview.parsed_files}</strong> parsed</span></div> : !map && summary && <div className="flow-summary" aria-label="Diagram summary"><span><strong>{summary.steps}</strong> steps</span><span><strong>{summary.decisions}</strong> decisions</span><span><strong>{summary.opened}</strong> opened</span></div>}
           </div>
         </header>
         <div className="toolbar" aria-label="Diagram controls">
@@ -579,7 +614,7 @@ export function App() {
             </button>
           </div>
         )}
-        {map && overview?.truncated && <p className="map-notice" role="status">This map shows a limited number of items. Focus a folder or search for a file to explore a smaller area.</p>}
+        {map && overview?.truncated && <p className="map-notice" role="status">This map is limited to {graph?.nodes.length ?? 0} visible items. Browse folders or search to reach every inventoried file.</p>}
         {placed && rendered && !emptyMap && (
           <div className={`diagram-container${updating || error ? " is-updating" : ""}`} aria-busy={updating} inert={updating || Boolean(error)}><Diagram
             placed={placed}
@@ -588,6 +623,7 @@ export function App() {
             fitSignal={fitSignal}
             selected={selected}
             onSelect={(id) => {
+              pendingMapSelection.current = null;
               setSelected(id);
               if (id) setTab("details");
             }}
@@ -682,14 +718,14 @@ export function App() {
             />
           ) : (
             selectedNode && (
-              map && graph ? <MapDetails node={selectedNode} graph={graph} onToggle={toggle} onFocus={focusMap} onEnter={enter} onClose={() => setSelected(null)} /> : <Details
+              map && graph ? <MapDetails node={selectedNode} graph={graph} sourceLine={selectedNode.detail.path === view?.path ? view?.line : undefined} onToggle={toggle} onFocus={focusMap} onEnter={enter} onClose={closeDetails} /> : <Details
                 node={selectedNode}
                 following={Boolean(view?.at)}
                 onToggle={toggle}
                 onEnter={enter}
                 onFollow={follow}
                 onSimulateFrom={!supportsSimulation ? undefined : (node) => openSetup(node.id === "s" ? null : node.id, node.label)}
-                onClose={() => setSelected(null)}
+                onClose={closeDetails}
               />
             )
           )}

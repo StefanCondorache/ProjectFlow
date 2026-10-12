@@ -2143,7 +2143,27 @@ kbd { padding: 1px 4px; border: 1px solid var(--hairline); border-radius: 3px; b
 .swatch-inferred { border-top-style: dashed; }
 .sidebar-footer { flex-wrap: wrap; }
 .sidebar-footer .language-badges { display: flex; flex-wrap: wrap; gap: 4px; }
+.folder-browser { padding-bottom: 10px; border-bottom: 1px solid var(--hairline); }
+.folder-location { display: flex; align-items: center; gap: 8px; margin: 0 20px 8px; }
+.folder-location > code { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.folder-location button, .folder-pages button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 30px; padding: 5px 8px; border: 1px solid var(--hairline); border-radius: 6px; background: var(--surface); color: var(--ink-2); font: 10px var(--sans); cursor: pointer; }
+.folder-location button:hover, .folder-pages button:not(:disabled):hover { border-color: var(--select); background: var(--select-tint); color: var(--select); }
+.folder-pages button:disabled { opacity: 0.45; cursor: default; }
+.folder-pages { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 7px; margin: 2px 20px 0; }
+.folder-pages > p { margin: 0; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.folder-pages > div { display: flex; gap: 5px; }
+.map-item-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.map-item-head > svg { flex-shrink: 0; color: var(--muted); }
+.map-item-head .entry-label { flex: 1; min-width: 0; }
+.map-navigation-item .entry-meta { margin-left: 24px; text-transform: capitalize; }
+.folder-current { flex-shrink: 0; color: var(--select); font: 9px var(--sans); }
+.map-search-path { display: block; margin: 5px 0 0 24px; overflow-wrap: anywhere; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.source .line.is-cited { background: var(--select-tint); box-shadow: inset 2px 0 var(--select); }
+.source-citation { margin-left: 8px; color: var(--select); font: 10px var(--sans); }
+.map-details { padding-top: 0; }
+.map-details > .details-head { position: sticky; top: 0; z-index: 2; flex-shrink: 0; padding-top: 22px; background: var(--surface); }
 @media (max-width: 760px) {
   .map-notice { padding: 8px 16px; }
   .map-breadcrumbs button { max-width: 130px; }
+  .folder-location button, .folder-pages button { min-height: 34px; }
 }

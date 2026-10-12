@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, languageName, type SearchHit } from "./api";
 import type { Entry, MapSearchResult, ProjectInfo } from "./types";
+import { FolderBrowser, MapNavigationItem } from "./FolderBrowser";
 
 const KIND_TEXT: Record<string, string> = {
   compose: "compose",
@@ -165,10 +166,10 @@ export function Sidebar({ project, current, onOpen, onFunction, onClose, modal, 
           ref={searchInput}
           className="filter"
           type="search"
-          placeholder={map ? "Search project files…" : "Search entries or functions…"}
+          placeholder={map ? "Search files and folders…" : "Search entries or functions…"}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          aria-label={map ? "Search project files" : "Search entry points and functions"}
+          aria-label={map ? "Search files and folders" : "Search entry points and functions"}
           autoComplete="off"
           spellCheck={false}
         />
@@ -193,20 +194,22 @@ export function Sidebar({ project, current, onOpen, onFunction, onClose, modal, 
             <span className="entry-meta"><span>Files, folders &amp; dependencies</span><span>{number.format(project.inventory?.files ?? stats.files)} files</span></span>
           </button></li>
         </ul>
+        {map && !needle && <FolderBrowser path={path ?? ""} current={path ?? ""} onOpen={(path) => onFile?.(path)} />}
         {map && needle && (
           <section aria-busy={fileSearch.status === "pending"}>
-            <h2 className="section-title">Files <span className="count">{fileSearch.status === "pending" ? "…" : fileSearch.hits.length === 30 ? "30+" : fileSearch.hits.length}</span></h2>
-            {fileSearch.status === "pending" && <p className="search-state" role="status">Searching files…</p>}
-            {fileSearch.status === "error" && <p className="search-state is-error" role="status">File search is unavailable. <button className="link" onClick={() => setSearchAttempt((attempt) => attempt + 1)}>Retry</button></p>}
+            <h2 className="section-title">Files &amp; folders <span className="count">{fileSearch.status === "pending" ? "…" : fileSearch.hits.length === 50 ? "50+" : fileSearch.hits.length}</span></h2>
+            {fileSearch.status === "pending" && <p className="search-state" role="status">Searching files and folders…</p>}
+            {fileSearch.status === "error" && <p className="search-state is-error" role="status">Project search is unavailable. <button className="link" onClick={() => setSearchAttempt((attempt) => attempt + 1)}>Retry</button></p>}
             <ul className="entries">
               {fileSearch.hits.map((hit) => <li key={hit.path}>
-                <button className={`entry${hit.path === path ? " is-current" : ""}`} aria-current={hit.path === path ? "page" : undefined} onClick={() => onFile?.(hit.path)} title={hit.path}>
-                  <code className="entry-label">{hit.label}</code>
-                  <span className="entry-meta"><span>{hit.path}</span><span>{languageName(hit.language)}</span></span>
-                </button>
+                <MapNavigationItem item={hit} current={path} showPath onOpen={(path) => {
+                  if (hit.category === "folder") setQuery("");
+                  onFile?.(path);
+                }} />
               </li>)}
             </ul>
-            {fileSearch.status === "ready" && fileSearch.hits.length === 0 && <p className="search-state" role="status">No matching files. Try a filename or a shorter search.</p>}
+            {fileSearch.status === "ready" && fileSearch.hits.length === 50 && <p className="search-state">Showing the first 50 matches. Refine your search to find more.</p>}
+            {fileSearch.status === "ready" && fileSearch.hits.length === 0 && <p className="search-state" role="status">No matching files or folders. Try a name or a shorter search.</p>}
           </section>
         )}
         {groups.map((group) => (
@@ -273,11 +276,11 @@ export function Sidebar({ project, current, onOpen, onFunction, onClose, modal, 
             <p>Try a function name, an entry point, or a shorter search.</p>
           </div>
         )}
-        {!needle && project.entries.length === 0 && (
+        {!map && !needle && project.entries.length === 0 && (
           <div className="sidebar-empty">
-            <strong>{map ? "Every file has a place" : "No entry points detected"}</strong>
-            <p>{map ? "Explore the project map or search for a file. Function flows appear where a language adapter supports them." : "Search for a function to start exploring this project."}</p>
-            <button className="link" onClick={() => searchInput.current?.focus()}>{map ? "Find a file →" : "Find a function →"}</button>
+            <strong>No entry points detected</strong>
+            <p>Search for a function to start exploring this project.</p>
+            <button className="link" onClick={() => searchInput.current?.focus()}>Find a function →</button>
           </div>
         )}
       </div>

@@ -13,6 +13,9 @@ const paths = {
   flow: "M4 4h6v6H4zM14 14h6v6h-6zM7 10v7h7M14 5h6m-3-3 3 3-3 3",
   close: "m6 6 12 12M6 18 18 6",
   check: "m5 12 4 4L19 6",
+  folder: "M3 7V5h7l2 2h9v13H3z",
+  file: "M14 3H5v18h14V8l-5-5zm0 0v5h5M8 12h8M8 16h6",
+  up: "M12 20V4m-7 7 7-7 7 7",
 } as const;
 
 export function Icon({ name, size = 16, style }: { name: keyof typeof paths; size?: number; style?: CSSProperties }) {

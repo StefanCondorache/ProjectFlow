@@ -8,6 +8,7 @@ It binds to 127.0.0.1 and only ever reads the analysed project.
                                              by file) or, with view=steps, every step
     GET /api/mermaid?(as flow or trail)&dir=  the same diagram as Mermaid text (dir: LR or TD)
     GET /api/source?file=&start=&end=        lines of an analysed source file
+    GET /api/map-children?path=&offset=&limit=  a page of inventoried folder children
     GET /api/search?q=                       functions whose name matches, best first
     GET /api/simulate?root=&expand=&start=&choices=node=yes,...
                                              walk the diagram with its data, frame by frame
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 import threading
 import webbrowser
 from dataclasses import asdict
@@ -35,6 +37,7 @@ from flowmap.journey import build_journey
 from flowmap.ir import Call, walk
 from flowmap.inventory import contained_path, read_source
 from flowmap.mermaid import to_mermaid
+from flowmap.navigation import browse_inventory
 from flowmap.overview import build_overview
 from flowmap.project import Project
 from flowmap.simulate import expects, simulate
@@ -110,12 +113,15 @@ class _Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         query = {k: v[-1] for k, v in parse_qs(url.query).items()}
         repeated = parse_qs(url.query, keep_blank_values=True)
+        if url.path == "/api/map-children":
+            query = {k: v[-1] for k, v in repeated.items()}
         if "open" in repeated:
             query["open"] = repeated["open"]
         routes = {
             "/api/project": self._project,
             "/api/overview": self._overview,
             "/api/map-search": self._map_search,
+            "/api/map-children": self._map_children,
             "/api/map-source": self._map_source,
             "/api/flow": self._flow,
             "/api/trail": self._flow,
@@ -213,12 +219,27 @@ class _Handler(BaseHTTPRequestHandler):
         needle = query.get("q", "").strip().lower()
         ranked = []
         if needle:
-            for path, item in self.project.inventory.files.items():
+            inventory = self.project.inventory
+            for path in inventory.directories | inventory.files.keys():
+                item = inventory.files.get(path)
                 label = Path(path).name
                 if needle in path.lower():
                     rank = 0 if label.lower() == needle else 1 if label.lower().startswith(needle) else 2
-                    ranked.append((rank, len(path), path, {"path": path, "label": label, "category": item.category, "language": item.language}))
+                    ranked.append((rank, len(path), path, {"path": path, "label": label, "category": item.category if item else "folder", "language": item.language if item else ""}))
         self._json([hit for *_, hit in sorted(ranked, key=lambda hit: hit[:3])[:50]])
+
+    def _map_children(self, query: dict) -> None:
+        pagination = {}
+        for key, default in (("offset", "0"), ("limit", "40")):
+            value = query.get(key, default)
+            if re.fullmatch(r"[+-]?[0-9]+", value) is None:
+                raise ValueError(f"{key} must be an integer")
+            pagination[key] = int(value)
+        try:
+            page = browse_inventory(self.project.inventory, query.get("path", ""), **pagination)
+        except FileNotFoundError as err:
+            raise NotFound(str(err)) from err
+        self._json(page)
 
     def _map_source(self, query: dict) -> None:
         start = int(query.get("start", 1))

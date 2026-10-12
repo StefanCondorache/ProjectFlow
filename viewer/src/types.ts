@@ -123,6 +123,14 @@ export interface MapSearchResult {
   language: string;
 }
 
+export interface MapChildrenPage {
+  path: string;
+  items: MapSearchResult[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
 export interface TrailInfo {
   origin: string;
   var: string;

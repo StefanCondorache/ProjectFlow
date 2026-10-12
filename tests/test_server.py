@@ -70,6 +70,9 @@ def map_base(tmp_path_factory):
     (root / "image.png").write_bytes(b"\x89PNG\0")
     (root / "comma,folder").mkdir()
     (root / "comma,folder/readme.custom").write_text("notes")
+    (root / "empty ü,folder").mkdir()
+    (root / "src/nested-empty").mkdir()
+    (root / "src-long").mkdir()
     server = make_server(load_project(root), web_dir=root, port=0)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}", root
@@ -106,6 +109,77 @@ def test_map_source_bounds_and_rejects_uninventoried_or_binary_files(map_base):
     assert status_of(f"{url}/api/map-source?file=value.ts&start=bad") == 400
     assert status_of(f"{url}/api/source?file=value.ts") == 404
     assert status_of(f"{url}/api/overview?path=../") == 404
+
+
+def test_map_children_pages_direct_children_and_normalizes_file_focus(map_base):
+    url, _ = map_base
+    assert get_json(f"{url}/api/map-children?" + urlencode({"path": "src/app.ts", "offset": 1, "limit": 1})) == {
+        "path": "src", "total": 2, "offset": 1, "limit": 1,
+        "items": [{"path": "src/app.ts", "label": "app.ts", "category": "module", "language": "typescript"}],
+    }
+    root = get_json(f"{url}/api/map-children")
+    assert root["path"] == "" and root["offset"] == 0 and root["limit"] == 40
+    assert root["total"] == 7
+    assert [item["path"] for item in root["items"][:4]] == ["comma,folder", "empty ü,folder", "src", "src-long"]
+
+
+def test_map_children_preserves_encoded_names_and_empty_folders(map_base):
+    url, _ = map_base
+    assert get_json(f"{url}/api/map-children?" + urlencode({"path": "comma,folder"})) == {
+        "path": "comma,folder", "total": 1, "offset": 0, "limit": 40,
+        "items": [{"path": "comma,folder/readme.custom", "label": "readme.custom", "category": "document", "language": "unknown"}],
+    }
+    assert get_json(f"{url}/api/map-children?" + urlencode({"path": "empty ü,folder", "offset": 100})) == {
+        "path": "empty ü,folder", "items": [], "total": 0, "offset": 100, "limit": 40,
+    }
+
+
+@pytest.mark.parametrize("path", ["missing", "../", "src/../src", "/src", "node_modules", "src/\0"])
+def test_map_children_rejects_invalid_paths_as_not_found(map_base, path):
+    url, _ = map_base
+    assert status_of(f"{url}/api/map-children?" + urlencode({"path": path})) == 404
+
+
+@pytest.mark.parametrize("query", [
+    {"offset": "-1"}, {"offset": "1.5"}, {"offset": "bad"}, {"offset": ""}, {"offset": "1_0"},
+    {"limit": "0"}, {"limit": "-1"}, {"limit": "101"}, {"limit": "1.5"}, {"limit": ""},
+])
+def test_map_children_rejects_malformed_or_out_of_bounds_pagination(map_base, query):
+    url, _ = map_base
+    assert status_of(f"{url}/api/map-children?" + urlencode(query)) == 400
+
+
+def test_map_search_includes_ranked_folder_hits_and_empty_folders(map_base):
+    url, _ = map_base
+    hits = get_json(f"{url}/api/map-search?q=src")
+    assert hits[:2] == [
+        {"path": "src", "label": "src", "category": "folder", "language": ""},
+        {"path": "src-long", "label": "src-long", "category": "folder", "language": ""},
+    ]
+    assert any(hit["path"] == "src/nested-empty" and hit["category"] == "folder" for hit in hits)
+    assert get_json(f"{url}/api/map-search?" + urlencode({"q": "empty ü,folder"})) == [
+        {"path": "empty ü,folder", "label": "empty ü,folder", "category": "folder", "language": ""},
+    ]
+
+
+def test_map_children_reaches_last_file_and_map_search_retains_array_cap(tmp_path):
+    (tmp_path / "wide").mkdir()
+    for i in range(240):
+        (tmp_path / "wide" / f"file{i:03}.custom").write_text("notes")
+    server = make_server(load_project(tmp_path), web_dir=tmp_path, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        page = get_json(f"{url}/api/map-children?path=wide&offset=200")
+        assert page["total"] == 240 and page["offset"] == 200 and page["limit"] == 40
+        assert len(page["items"]) == 40 and page["items"][-1]["path"] == "wide/file239.custom"
+        hits = get_json(f"{url}/api/map-search?q=wide")
+        assert isinstance(hits, list) and len(hits) == 50
+        assert hits[0] == {"path": "wide", "label": "wide", "category": "folder", "language": ""}
+        assert hits[-1]["path"] == "wide/file048.custom"
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_map_mermaid_route_does_not_require_a_function(map_base):

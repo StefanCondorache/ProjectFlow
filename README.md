@@ -19,9 +19,14 @@ opens a local viewer in the browser (it only reads the folder, never writes to i
   and unrecognized files all have a place. Arrows describe imports, and several
   imports between collapsed areas share one counted link. Select a card for
   metadata, dependency evidence and a bounded text preview where available.
-  Search finds project files; *Focus file* or *Focus folder* narrows the map,
-  with breadcrumbs and *Back to project* to return. A Python file's inspector
-  offers *Open flow* for its analyzed functions.
+  Browse files and folders in pages of 40, with *Previous*, *Next* and *Up*;
+  search finds both files and folders. *Focus file* or *Focus folder* narrows
+  the map, with breadcrumbs and *Back to project* to return. Opening a file
+  also selects its inspector. Click a dependency's `file:line` citation to
+  open and highlight that source line in a 60-line preview, starting up to
+  12 lines before it. File and line are preserved in the URL for bookmarks
+  and browser Back. Ordinary previews show the first 60 lines. A Python
+  file's inspector offers *Open flow* for its analyzed functions.
 - **Entry points**: the program's starts, found on their own: Docker/compose
   commands (following shell scripts they run), `pyproject` scripts, packages run
   with `python -m`, and `if __name__ == "__main__"` scripts, grouped with the
@@ -135,8 +140,11 @@ real run would be a later, optional layer.
   types; import enrichment currently covers Python and inferred JS/TS imports.
 - Project maps exclude ignored/generated directories and files outside the
   project, including symlinks that escape it. Large maps and text previews are
-  bounded; a map notice suggests focusing an area when the visible node limit
-  is reached.
+  bounded; maps show at most 200 visible items. The folder browser can reach
+  every inventoried file through paging, including files omitted from the
+  current map. The summary counts observed imports; the inspector lists only
+  connections drawn for the selected card. Imports within a collapsed area
+  can be folded out of that view.
 - Calls are resolved without running anything: calls through variables,
   callbacks, `getattr`, registries or dependency injection cannot be followed,
   and are left out rather than guessed.
