@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { supportsSimulation, type ViewState } from "./api";
+import { languageName, supportsSimulation, type ViewState } from "./api";
 import type { ProjectInfo } from "./types";
 
 const legacy: ProjectInfo = {
@@ -58,5 +58,17 @@ describe("simulation capabilities", () => {
   it("keeps malformed metadata disabled without throwing", () => {
     const malformed = { ...project, file_languages: { "worker.py": null }, capabilities: { ...project.capabilities, simulation_languages: null } } as unknown as ProjectInfo;
     expect(supportsSimulation(malformed, flow("worker.py::run"))).toBe(false);
+  });
+});
+
+describe("Java", () => {
+  const java: ProjectInfo = {
+    ...project, files: [...project.files, "src/main/java/a/App.java"],
+    file_languages: { ...project.file_languages, "src/main/java/a/App.java": "java" },
+    capabilities: { overview: true, flow_languages: ["java", "python"], trail_languages: ["java", "python"], simulation_languages: ["python"] },
+  };
+  it("names the language and keeps simulation off for Java flows", () => {
+    expect(languageName("java")).toBe("Java");
+    expect(supportsSimulation(java, flow("src/main/java/a/App.java::App.run@8:2"))).toBe(false);
   });
 });

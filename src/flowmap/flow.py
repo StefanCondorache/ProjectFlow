@@ -292,7 +292,8 @@ class _Fragment:
             for handler in item.handlers:
                 if not self._kept(handler):
                     continue
-                label = f"except {handler.types}" if handler.types else "except"
+                word = "except" if self.fn.language == "python" else "catch"
+                label = f"{word} {handler.types}" if handler.types else word
                 box = self._node("handler", label, parent, item_key(handler), line=handler.line)
                 self.edges.append(Edge(frame, box, handler.types or "error", "error"))
                 if self._seq(handler.body, [], box):

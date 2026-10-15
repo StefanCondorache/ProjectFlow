@@ -1,7 +1,7 @@
 # flowmap
 
 Point it at a project folder; explore its files, folders and observed imports in
-a project map. Python, TypeScript and JavaScript functions have static flow
+a project map. Python, TypeScript, JavaScript and Java functions have static flow
 diagrams and data trails; Python also supports simulation. Nothing to configure
 and no AI: the same code always gives the same
 diagram.
@@ -27,7 +27,7 @@ opens a local viewer in the browser (it only reads the folder, never writes to i
   open and highlight that source line in a 60-line preview, starting up to
   12 lines before it. File and line are preserved in the URL for bookmarks
   and browser Back. Ordinary previews show the first 60 lines. An analyzed
-  Python, TypeScript or JavaScript file's inspector offers *Open flow* for its
+  Python, TypeScript, JavaScript or Java file's inspector offers *Open flow* for its
   functions and shows diagnostics when analysis is partial.
 - **Entry points**: the program's starts, found on their own: Docker/compose
   commands (following shell scripts they run), `pyproject` scripts, packages run
@@ -119,6 +119,7 @@ appear in the navigation, independently of semantic analysis support.
 | Python | Yes | Yes | Yes |
 | TypeScript / TSX (`.ts`, `.tsx`, `.mts`, `.cts`) | Yes | Yes | No |
 | JavaScript / JSX (`.js`, `.jsx`, `.mjs`, `.cjs`) | Yes | Yes | No |
+| Java (`.java`) | Yes | Yes | No |
 | Other languages | File/folder map only | No | No |
 
 - Resolved imports between Python project modules are shown as verified
@@ -130,14 +131,17 @@ appear in the navigation, independently of semantic analysis support.
   verified links retain source evidence. External and unresolved imports stay
   inferred. Emitted `.js` references can resolve to TypeScript source, and
   directory imports can resolve to an index file.
+- Java uses the Tree-sitter Java parser for classes, interfaces, enums,
+  records, methods, constructors, lambdas and anonymous classes. Imports of
+  project classes are verified dependency links; library packages stay
+  inferred. Nothing is compiled and Maven/Gradle are never run.
 - Other languages receive file/folder structure and readable text previews.
 
 Each semantic language adapter (`src/flowmap/lang/`) turns source into a shared
 model; the structural map and viewer work without one. Import links represent
 observed dependencies, not execution order.
 
-The planned rollout after TypeScript/JavaScript is Java → Rust → PHP → Shell →
-C++ → Go. Python is already supported. These later adapters are planned;
+The planned rollout after Java is Rust → PHP → Shell → C++ → Go. Python is already supported. These later adapters are planned;
 recognizing their files in the map does not provide function analysis.
 
 ## How calls are resolved
@@ -149,16 +153,20 @@ return values. Each resolved call is marked *exact*, *inferred* or *guess*
 out rather than invented. JavaScript/TypeScript calls resolve only when lexical
 scope, imports or justified receiver types select a single target. Shadowed
 names, reassigned bindings, computed imports and uncertain dynamic dispatch
-remain unresolved. Values are the simulation's part (above); tracing a
+remain unresolved. Java calls resolve from declared types: the receiver's
+declared class selects the method by name, argument count and known argument
+types. Static, private, final, constructor and `super` calls are exact; calls
+on interfaces, abstract methods, ambiguous overloads and methods that a
+loaded subclass overrides stay unresolved. Values are the simulation's part (above); tracing a
 real run would be a later, optional layer.
 
 ## Limitations
 
 **Diagrams**
 
-- Function flows and static data trails support Python, TypeScript and
-  JavaScript. Structural project maps work for all file types. JavaScript and
-  TypeScript simulation is unavailable; simulation controls follow the current
+- Function flows and static data trails support Python, TypeScript,
+  JavaScript and Java. Structural project maps work for all file types.
+  JavaScript, TypeScript and Java simulation is unavailable; simulation controls follow the current
   function's declared language and advertised capabilities.
 - JavaScript/TypeScript analysis is conservative: callbacks and dynamic call
   targets, path aliases, package `exports` conditions and runtime module loading
@@ -174,6 +182,16 @@ real run would be a later, optional layer.
   computed keys (`obj[key] = ...`) or reflection (`Object.assign`,
   `Object.defineProperty`, `eval`) is not detected. Files nested too deeply to
   analyze keep their structural map view.
+- Java analysis does not run annotation processors (Lombok-generated members
+  stay unresolved) or follow reflection and dependency injection. Instance
+  field initializers and initializer blocks are shown inside constructors.
+  Static initializers, labeled jumps, switch fallthrough and classic `for`
+  loops containing `continue` produce partial-analysis diagnostics instead of
+  flow. Methods inherited from library interfaces are not known; an
+  unqualified call reaches the enclosing class's method of that name. In a
+  class extending a library class, a call resolves only when its argument
+  types rule out a more specific library overload. Spring controllers and
+  servlets are not entry points.
 - Project maps exclude ignored/generated directories and files outside the
   project, including symlinks that escape it. Large maps and text previews are
   bounded; maps show at most 200 visible items. The folder browser can reach

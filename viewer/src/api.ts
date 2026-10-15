@@ -42,7 +42,7 @@ export function supportsSimulation(project: ProjectInfo | null, view: ViewState 
 }
 
 export function languageName(language: string): string {
-  const names: Record<string, string> = { python: "Python", javascript: "JavaScript", typescript: "TypeScript", markdown: "Markdown", json: "JSON", yaml: "YAML", toml: "TOML", html: "HTML", css: "CSS", shell: "Shell", unknown: "Other files" };
+  const names: Record<string, string> = { python: "Python", javascript: "JavaScript", typescript: "TypeScript", java: "Java", markdown: "Markdown", json: "JSON", yaml: "YAML", toml: "TOML", html: "HTML", css: "CSS", shell: "Shell", unknown: "Other files" };
   return names[language] ?? language;
 }
 

@@ -209,6 +209,13 @@ def extract_relationships(project: Project) -> list[Relationship]:
                     continue
                 text = lines[imp.line - 1].strip()[:300] if 0 < imp.line <= len(lines) else ""
                 relationships.append(Relationship(file, target, confidence, {"file": file, "line": imp.line, "text": text}))
+        elif module is not None and hasattr(project.resolvers.get(module.language), "dependencies"):
+            # Adapters that report their own file-level evidence (Java).
+            source = read_text(project.root, file)
+            lines = source.splitlines() if source is not None else []
+            for target, confidence, line in project.resolvers[module.language].dependencies(file):
+                text = lines[line - 1].strip()[:300] if 0 < line <= len(lines) else ""
+                relationships.append(Relationship(file, target, confidence, {"file": file, "line": line, "text": text}))
         elif module is not None and module.language in ("javascript", "typescript"):
             # Parsed source has authoritative AST import/shadowing evidence.
             # Never replace it with the structural lexical fallback, even if
