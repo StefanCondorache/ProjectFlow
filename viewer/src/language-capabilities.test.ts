@@ -72,3 +72,9 @@ describe("Java", () => {
     expect(supportsSimulation(java, flow("src/main/java/a/App.java::App.run@8:2"))).toBe(false);
   });
 });
+
+describe("Rust", () => {
+  it("names the language", () => {
+    expect(languageName("rust")).toBe("Rust");
+  });
+});

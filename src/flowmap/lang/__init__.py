@@ -30,5 +30,6 @@ def adapters() -> list[Adapter]:
     from flowmap.lang.ecmascript import ADAPTERS as ecmascript
     from flowmap.lang.java import ADAPTERS as java
     from flowmap.lang.python import ADAPTER as python
+    from flowmap.lang.rust import ADAPTERS as rust
 
-    return [python, *ecmascript, *java]
+    return [python, *ecmascript, *java, *rust]

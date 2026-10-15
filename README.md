@@ -1,7 +1,7 @@
 # flowmap
 
 Point it at a project folder; explore its files, folders and observed imports in
-a project map. Python, TypeScript, JavaScript and Java functions have static flow
+a project map. Python, TypeScript, JavaScript, Java and Rust functions have static flow
 diagrams and data trails; Python also supports simulation. Nothing to configure
 and no AI: the same code always gives the same
 diagram.
@@ -27,7 +27,7 @@ opens a local viewer in the browser (it only reads the folder, never writes to i
   open and highlight that source line in a 60-line preview, starting up to
   12 lines before it. File and line are preserved in the URL for bookmarks
   and browser Back. Ordinary previews show the first 60 lines. An analyzed
-  Python, TypeScript, JavaScript or Java file's inspector offers *Open flow* for its
+  Python, TypeScript, JavaScript, Java or Rust file's inspector offers *Open flow* for its
   functions and shows diagnostics when analysis is partial.
 - **Entry points**: the program's starts, found on their own: Docker/compose
   commands (following shell scripts they run), `pyproject` scripts, packages run
@@ -120,6 +120,7 @@ appear in the navigation, independently of semantic analysis support.
 | TypeScript / TSX (`.ts`, `.tsx`, `.mts`, `.cts`) | Yes | Yes | No |
 | JavaScript / JSX (`.js`, `.jsx`, `.mjs`, `.cjs`) | Yes | Yes | No |
 | Java (`.java`) | Yes | Yes | No |
+| Rust (`.rs`) | Yes | Yes | No |
 | Other languages | File/folder map only | No | No |
 
 - Resolved imports between Python project modules are shown as verified
@@ -135,13 +136,18 @@ appear in the navigation, independently of semantic analysis support.
   records, methods, constructors, lambdas and anonymous classes. Imports of
   project classes are verified dependency links; library packages stay
   inferred. Nothing is compiled and Maven/Gradle are never run.
+- Rust uses the Tree-sitter Rust parser. Crates come from `Cargo.toml` files
+  and Cargo's layout (`src/main.rs`, `src/lib.rs`, `src/bin`, `examples`);
+  `mod` declarations build each crate's module tree. `mod` and `use` links to
+  project files are verified; other crates stay inferred. Cargo is never run
+  and macros are not expanded.
 - Other languages receive file/folder structure and readable text previews.
 
 Each semantic language adapter (`src/flowmap/lang/`) turns source into a shared
 model; the structural map and viewer work without one. Import links represent
 observed dependencies, not execution order.
 
-The planned rollout after Java is Rust → PHP → Shell → C++ → Go. Python is already supported. These later adapters are planned;
+The planned rollout after Rust is PHP → Shell → C++ → Go. Python is already supported. These later adapters are planned;
 recognizing their files in the map does not provide function analysis.
 
 ## How calls are resolved
@@ -157,7 +163,11 @@ remain unresolved. Java calls resolve from declared types: the receiver's
 declared class selects the method by name, argument count and known argument
 types. Static, private, final, constructor and `super` calls are exact; calls
 on interfaces, abstract methods, ambiguous overloads and methods that a
-loaded subclass overrides stay unresolved. Values are the simulation's part (above); tracing a
+loaded subclass overrides stay unresolved. Rust paths resolve through each
+module's items and `use` imports; method calls resolve on a known concrete
+receiver type (inherent method, then a single trait impl or trait default).
+Calls through `dyn` traits, generics, `Box`/`Rc`/`Arc` and similar wrappers
+stay unresolved. Values are the simulation's part (above); tracing a
 real run would be a later, optional layer.
 
 ## Limitations
@@ -165,8 +175,8 @@ real run would be a later, optional layer.
 **Diagrams**
 
 - Function flows and static data trails support Python, TypeScript,
-  JavaScript and Java. Structural project maps work for all file types.
-  JavaScript, TypeScript and Java simulation is unavailable; simulation controls follow the current
+  JavaScript, Java and Rust. Structural project maps work for all file types.
+  Simulation is available for Python only; simulation controls follow the current
   function's declared language and advertised capabilities.
 - JavaScript/TypeScript analysis is conservative: callbacks and dynamic call
   targets, path aliases, package `exports` conditions and runtime module loading
@@ -192,6 +202,11 @@ real run would be a later, optional layer.
   class extending a library class, a call resolves only when its argument
   types rule out a more specific library overload. Spring controllers and
   servlets are not entry points.
+- Rust macros are not expanded: calls inside macro arguments (including
+  `println!` and `format!`) are not drawn, console macros count as console
+  output and `panic!`-style macros as errors. The `?` operator's early return
+  is not drawn. `#[cfg]` items are all included. A `.rs` file no crate root
+  declares through `mod` gets a partial-analysis warning.
 - Project maps exclude ignored/generated directories and files outside the
   project, including symlinks that escape it. Large maps and text previews are
   bounded; maps show at most 200 visible items. The folder browser can reach

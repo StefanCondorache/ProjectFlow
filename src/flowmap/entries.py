@@ -43,8 +43,8 @@ DEPLOY_PATTERNS = (
 )
 
 # Lower is more official. Kinds with equal rank keep this order of preference.
-KIND_ORDER = ("compose", "docker", "procfile", "pyproject", "package-script", "package-bin", "build-main", "shell", "package-main", "main-guard", "java-main", "module-script")
-RANK = {"compose": 0, "docker": 0, "procfile": 0, "pyproject": 1, "package-script": 1, "package-bin": 1, "build-main": 1, "shell": 2, "package-main": 3, "main-guard": 4, "java-main": 4, "module-script": 4}
+KIND_ORDER = ("compose", "docker", "procfile", "pyproject", "package-script", "package-bin", "build-main", "cargo-bin", "shell", "package-main", "main-guard", "java-main", "cargo-example", "module-script")
+RANK = {"compose": 0, "docker": 0, "procfile": 0, "pyproject": 1, "package-script": 1, "package-bin": 1, "build-main": 1, "cargo-bin": 1, "shell": 2, "package-main": 3, "main-guard": 4, "java-main": 4, "cargo-example": 4, "module-script": 4}
 
 _SHELLS = {"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/env"}
 _PREFIXES = {"exec", "nohup", "time", "env", "sudo"}
