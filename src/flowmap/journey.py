@@ -30,7 +30,8 @@ def _nearest_active(trail: Trail, prefix: str | None) -> Context | None:
 def build_journey(project: Project, trail: Trail) -> Graph:
     root = trail.contexts.get("")
     graph = Graph(root.function if root else "")
-    var = "result" if trail.var.startswith("$") else trail.var
+    generated = trail.generated if trail.generated is not None else trail.var.startswith("$")
+    var = "result" if generated else trail.var
     start = Node("origin", "start", var, None, {"var": trail.var, "origin": trail.origin})
     graph.nodes.append(start)
 
@@ -62,15 +63,15 @@ def build_journey(project: Project, trail: Trail) -> Graph:
 
     seen: set[tuple[str, str, str]] = set()
 
-    def connect(source: str, target: str, label: str, kind: str, data: list[str]) -> None:
+    def connect(source: str, target: str, label: str, kind: str, data: list[str], generated_data: list[str] | None = None) -> None:
         if (source, target, kind) not in seen and source != target:
             seen.add((source, target, kind))
-            graph.edges.append(Edge(source, target, label, kind, data))
+            graph.edges.append(Edge(source, target, label, kind, data, generated_data=generated_data or []))
 
     origin_prefix = trail.origin.rsplit("/", 1)[0] + "/" if "/" in trail.origin else ""
     origin = trail.contexts.get(origin_prefix)
     if origin is not None and origin.function in boxes:
-        connect(start.id, boxes[origin.function].id, var, "flow", [trail.var])
+        connect(start.id, boxes[origin.function].id, var, "flow", [trail.var], [trail.var] if generated else [])
 
     for ctx in active:
         caller = _nearest_active(trail, ctx.parent)

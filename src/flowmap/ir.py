@@ -199,6 +199,10 @@ class Function:
     is_async: bool = False
     imports: list[Import] = field(default_factory=list)
     hints: dict[str, list[Hint]] = field(default_factory=dict)
+    language: str = "python"
+    receiver: str | None = None  # implicit receiver; Python uses its first explicit param
+    is_constructor: bool = False
+    generated_temps: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -227,13 +231,65 @@ class Module:
     globals: dict[str, list[Hint]] = field(default_factory=dict)
     constants: dict[str, str] = field(default_factory=dict)  # module-level name -> source of its value
     guard: tuple[int, int] | None = None  # first and last line of ``if __name__ == "__main__":``
+    metadata: dict = field(default_factory=dict)
+    diagnostics: list[dict] = field(default_factory=list)
+
+
+def is_generated(fn: Function, name: str) -> bool:
+    """Generated value identity; Python retains its legacy reserved spelling."""
+    return name in fn.generated_temps or (fn.language == "python" and name.startswith("$"))
+
+
+def call_results(fn: Function) -> dict[int, list[str]]:
+    """Visible results of calls, including an immediately assigned generated value.
+
+    Some adapters lower ``value = call()`` to a generated call result followed
+    by Assign. Keep that IR intact while exposing its user binding to diagrams
+    and trails. Look only within each block, never across branches.
+    """
+    results: dict[int, list[str]] = {}
+
+    def block(items: list[Item]) -> None:
+        for index, item in enumerate(items):
+            if isinstance(item, Call):
+                results[id(item)] = item.defs
+                following = items[index + 1] if index + 1 < len(items) else None
+                if (fn.language != "python" and isinstance(following, Assign)
+                        and following.uses and set(following.uses) <= set(item.defs)
+                        and all(is_generated(fn, name) for name in following.uses)
+                        and following.defs and all(not is_generated(fn, name) for name in following.defs)):
+                    results[id(item)] = following.defs
+            for children in child_blocks(item):
+                block(children)
+
+    block(fn.body)
+    return results
 
 
 def self_name(fn: Function) -> str | None:
     """The name a method calls its own object by (``self``), if it has one."""
+    if fn.language != "python":
+        return fn.receiver
     if fn.cls and fn.params and "staticmethod" not in fn.decorators:
         return fn.params[0].name
     return None
+
+
+def constructor(fn: Function) -> bool:
+    """Constructor metadata, with compatibility for existing Python IR."""
+    return fn.is_constructor or (fn.language == "python" and fn.name == "__init__")
+
+
+def callable_params(fn: Function, call: Call | None = None) -> list[Param]:
+    """Actual parameters, preserving Python plain-name unbound method calls.
+
+    An implicit receiver is separate from the parameter list. Python's first
+    explicit receiver is omitted at START and for bound calls/constructors.
+    """
+    skip = fn.language == "python" and self_name(fn) is not None and (
+        call is None or constructor(fn) or "." in call.callee
+    )
+    return fn.params[1:] if skip else fn.params
 
 
 def child_blocks(item: Item) -> list[list[Item]]:

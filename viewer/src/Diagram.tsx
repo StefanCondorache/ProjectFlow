@@ -3,6 +3,8 @@ import { isFrame, roundedPath, type Direction, type Placed, type PlacedNode, typ
 import { overviewPoint, overviewTransform, resizeView, revealBox, visibleGraphWindow, type CameraView as View } from "./minimap";
 import { pathLength, pointAt, tokenPath, type SimFrame } from "./sim";
 import type { FlowEdge, FlowNode } from "./types";
+import { edgeDataLabel } from "./data-labels";
+import { languageName } from "./api";
 
 /** A running simulation, as the diagram needs it. */
 export interface TokenRun {
@@ -430,9 +432,9 @@ export function Diagram({ placed, rootKey, anchor, fitSignal, selected, onSelect
                             event.stopPropagation();
                             onFollow(e.edge.source, name);
                           }}
-                          title={`Follow ${name.startsWith("$") ? "this result" : name} through the code`}
+                          title={`Follow ${edgeDataLabel(name, e.edge.generated_data, "this result")} through the code`}
                         >
-                          {name.startsWith("$") ? "result" : name}
+                          {edgeDataLabel(name, e.edge.generated_data)}
                         </button>
                       </span>
                     ))
@@ -580,7 +582,7 @@ function NodeBox({ p, selected, current, failing, onToggle, onFocus, following }
     case "asset":
     case "external": {
       const basename = node.kind === "external" ? node.label : (d.path ?? node.label).split("/").filter(Boolean).pop() || node.label;
-      const badge = node.kind === "folder" ? "Folder" : d.language || d.category || (node.kind === "module" ? "File" : node.kind);
+      const badge = node.kind === "folder" ? "Folder" : (d.language && languageName(d.language)) || d.category || (node.kind === "module" ? "File" : node.kind);
       const metadata = node.kind === "folder" ? `${d.files ?? 0} file${d.files === 1 ? "" : "s"}` : node.kind === "external" ? "External dependency" : d.functions?.length ? `${d.functions.length} function${d.functions.length === 1 ? "" : "s"}` : d.size !== undefined ? formatBytes(d.size) : "Project file";
       return (
         <div {...common} className={cx(className, "map-card")} onDoubleClick={() => node.kind === "folder" && d.expandable && onToggle(node)}>
@@ -593,7 +595,7 @@ function NodeBox({ p, selected, current, failing, onToggle, onFocus, following }
             </div>
             {node.kind === "folder" && d.expandable && <ToggleButton node={node} open={false} onToggle={onToggle} />}
           </div>
-          <div className="map-card-footer"><span>{metadata}</span><span>{node.kind === "folder" ? "Explore area" : d.analysis === "semantic" ? d.functions?.length ? "Flow available" : "Parsed source" : d.analysis === "imports" || d.analysis === "inferred" ? "Import analysis" : "Structure"}</span></div>
+          <div className="map-card-footer"><span>{metadata}</span><span>{node.kind === "folder" ? "Explore area" : d.analysis === "semantic" ? d.functions?.length ? "Flow available" : "Parsed source" : d.analysis === "partial" ? "Partial analysis" : d.analysis === "imports" || d.analysis === "inferred" ? "Import analysis" : "Structure"}</span></div>
         </div>
       );
     }

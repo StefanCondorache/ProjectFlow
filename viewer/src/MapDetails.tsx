@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { api, languageName } from "./api";
-import type { FlowGraph, FlowNode, SourceLines } from "./types";
+import { api, languageName, supportsSimulation } from "./api";
+import type { FlowGraph, FlowNode, ProjectInfo, SourceLines } from "./types";
 
 interface Props {
   node: FlowNode;
   graph: FlowGraph;
+  project?: ProjectInfo;
   onToggle: (node: FlowNode) => void;
   sourceLine?: number;
   onFocus: (path: string, line?: number) => void;
@@ -52,7 +53,7 @@ export function MapSourcePreview({ source, sourceLine }: { source: SourceLines; 
   })}</code></pre>;
 }
 
-export function MapDetails({ node, graph, sourceLine, onToggle, onFocus, onEnter, onClose }: Props) {
+export function MapDetails({ node, graph, project, sourceLine, onToggle, onFocus, onEnter, onClose }: Props) {
   const d = node.detail;
   const path = d.path;
   const readable = Boolean(path && d.readable && node.kind !== "folder" && node.kind !== "external");
@@ -77,7 +78,13 @@ export function MapDetails({ node, graph, sourceLine, onToggle, onFocus, onEnter
   const relationships = graph.edges.filter((edge) => edge.kind === "dependency" && (edge.source === node.id || edge.target === node.id));
   const folder = node.kind === "folder";
   const expanded = Boolean(d.container || d.expanded);
-  const analysis = d.analysis === "semantic" ? d.functions?.length ? "Function flows available" : "Parsed source" : ANALYSIS[d.analysis ?? ""] ?? d.analysis;
+  const partial = d.analysis === "partial" || Boolean(d.diagnostics?.length);
+  const semantic = d.analysis === "semantic" || d.analysis === "partial";
+  const analysis = partial ? "Partial analysis" : d.analysis === "semantic" ? d.functions?.length ? "Function flows available" : "Parsed source" : ANALYSIS[d.analysis ?? ""] ?? d.analysis;
+  const language = d.language ?? "unknown";
+  const flowAvailable = semantic && (project?.capabilities?.flow_languages ?? ["python", "javascript", "typescript"]).includes(language);
+  const trailAvailable = semantic && (project?.capabilities ? project.capabilities.trail_languages ?? ["python"] : ["python", "javascript", "typescript"]).includes(language);
+  const simulationAvailable = project && path ? supportsSimulation(project, { root: `${path}::<main>`, expanded: [] }) : language === "python";
   return (
     <section className="details map-details" aria-label="Project map details">
       <header className="details-head">
@@ -98,6 +105,17 @@ export function MapDetails({ node, graph, sourceLine, onToggle, onFocus, onEnter
           {!folder && node.kind !== "external" && <><dt>Preview</dt><dd>{d.readable ? "Text preview available" : "No text preview available"}</dd></>}
         </dl>
       </section>
+      {flowAvailable && <p className="details-doc">{trailAvailable ? "Static function flows and data trails are available." : "Static function flows are available."} {simulationAvailable ? "Simulation is available for this language." : `Simulation is unavailable for ${languageName(language)}.`}</p>}
+      {partial && (
+        <section className="detail-section" aria-label="Analysis diagnostics">
+          <h3>Partial analysis</h3>
+          <p className="details-doc">Some source could not be fully analyzed. Flows and data trails may omit those portions.</p>
+          {d.diagnostics && d.diagnostics.length > 0 && <ul className="analysis-diagnostics">{d.diagnostics.map((diagnostic, index) => <li key={`${diagnostic.code}:${diagnostic.line}:${diagnostic.col}:${index}`}>
+            <p>{diagnostic.message}</p>
+            <span>{diagnostic.severity} · <code>{diagnostic.code}</code> · {path && diagnostic.line > 0 ? <button className="link" onClick={() => onFocus(path, diagnostic.line)}>line {diagnostic.line}, column {diagnostic.col}</button> : <span>line {diagnostic.line}, column {diagnostic.col}</span>}</span>
+          </li>)}</ul>}
+        </section>
+      )}
       {path && (
         <section className="detail-section">
           <h3>Explore</h3>

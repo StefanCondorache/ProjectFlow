@@ -64,7 +64,7 @@ def test_project_lists_ranked_entries(base):
 def map_base(tmp_path_factory):
     root = tmp_path_factory.mktemp("generic")
     (root / "src").mkdir()
-    (root / "src/app.ts").write_text("import '../value';\nexport const app = 1")
+    (root / "src/app.ts").write_text("import '../value';\nimport 'external-package';\nexport const app = 1")
     (root / "value.ts").write_text("export const value = 1")
     (root / "notes ü.custom").write_text("\n".join(str(i) for i in range(400)))
     (root / "image.png").write_bytes(b"\x89PNG\0")
@@ -83,7 +83,7 @@ def map_base(tmp_path_factory):
 def test_generic_overview_summary_and_search_routes(map_base):
     url, _ = map_base
     summary = get_json(f"{url}/api/project")
-    assert summary["stats"]["files"] == 0 and summary["entries"] == []
+    assert summary["stats"]["files"] == 2 and summary["entries"] == []
     assert summary["inventory"]["files"] == 5
     assert summary["capabilities"]["overview"] is True
     assert summary["capabilities"]["simulation_languages"] == []
@@ -94,7 +94,8 @@ def test_generic_overview_summary_and_search_routes(map_base):
     assert any(n["id"] == "file:src/app.ts" and n["parent"] == "dir:src" for n in opened["nodes"])
     focused = get_json(f"{url}/api/overview?path=src/app.ts")
     assert focused["overview"]["files"] == 1
-    assert focused["edges"][0]["confidence"] == "inferred"
+    dependency = next(edge for edge in focused["edges"] if edge["target"] == "file:value.ts")
+    assert dependency["source"] == "file:src/app.ts" and dependency["confidence"] == "verified"
     hits = get_json(f"{url}/api/map-search?" + urlencode({"q": "notes ü"}))
     assert hits == [{"path": "notes ü.custom", "label": "notes ü.custom", "category": "document", "language": "unknown"}]
     assert get_json(f"{url}/api/map-search?q=") == []
@@ -107,7 +108,8 @@ def test_map_source_bounds_and_rejects_uninventoried_or_binary_files(map_base):
     for file in ("../../etc/passwd", "/etc/passwd", "missing", "image.png"):
         assert status_of(f"{url}/api/map-source?" + urlencode({"file": file})) == 404
     assert status_of(f"{url}/api/map-source?file=value.ts&start=bad") == 400
-    assert status_of(f"{url}/api/source?file=value.ts") == 404
+    assert get_json(f"{url}/api/source?file=value.ts")["lines"] == ["export const value = 1"]
+    assert status_of(f"{url}/api/source?" + urlencode({"file": "notes ü.custom"})) == 404
     assert status_of(f"{url}/api/overview?path=../") == 404
 
 
@@ -187,7 +189,7 @@ def test_map_mermaid_route_does_not_require_a_function(map_base):
     kind, data = get(f"{url}/api/mermaid?mode=map&expand=dir:src&dir=TD")
     assert kind == "text/plain"
     assert data.decode().startswith("flowchart TD") and "subgraph" in data.decode()
-    assert "-.->" in data.decode()
+    assert "-.->" in data.decode() and " --> " in data.decode()
 
 
 def test_map_repeated_open_parameters_preserve_commas_in_folder_names(map_base):
@@ -281,7 +283,8 @@ def test_viewer_falls_back_to_a_free_port_when_the_default_is_busy(tmp_path):
 def test_trail_steps_view_opens_the_steps_the_data_enters(base):
     query = {"root": "src/shop/cli.py::main", "at": "s", "var": "argv", "view": "steps"}
     data = get_json(f"{base}/api/trail?" + urlencode(query))
-    assert data["trail"] == {"origin": "s", "var": "argv", "truncated": False, "view": "steps"}
+    assert data["trail"] == {"origin": "s", "var": "argv", "truncated": False, "view": "steps",
+                             "generated": False}
     parse = next(n for n in data["nodes"] if n["label"] == "parse")
     assert parse["kind"] == "group"
 

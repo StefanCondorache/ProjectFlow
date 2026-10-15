@@ -79,6 +79,7 @@ def project_summary(project: Project) -> dict:
         "name": project.name,
         "root": str(project.root),
         "files": sorted(project.modules),
+        "file_languages": {file: module.language for file, module in sorted(project.modules.items())},
         "stats": {
             "files": len(project.modules),
             "functions": len(project.functions),
@@ -88,7 +89,7 @@ def project_summary(project: Project) -> dict:
         },
         "entries": [asdict(e) for e in project.entries],
         "inventory": {"files": len(project.inventory.files), "parsed_files": len(project.modules), "languages": project.inventory.languages()},
-        "capabilities": {"overview": True, "flow_languages": sorted({m.language for m in project.modules.values()}), "simulation_languages": sorted({m.language for m in project.modules.values() if m.language == "python"})},
+        "capabilities": {"overview": True, "flow_languages": project.flow_languages, "trail_languages": project.flow_languages, "simulation_languages": project.simulation_languages},
     }
 
 
@@ -186,7 +187,8 @@ class _Handler(BaseHTTPRequestHandler):
             if not trail.found:
                 raise NotFound(f"no {query['var']!r} at {query['at']!r}")
             view = "steps" if query.get("view") == "steps" else "journey"
-            info = {"origin": trail.origin, "var": trail.var, "truncated": trail.truncated, "view": view}
+            info = {"origin": trail.origin, "var": trail.var, "truncated": trail.truncated, "view": view,
+                    "generated": trail.generated}
             if view == "journey":
                 return build_journey(self.project, trail), info
             return build_flow(self.project, root, start_label=start, trail=trail), info

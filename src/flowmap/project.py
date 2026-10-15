@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from flowmap.inventory import Inventory, build_inventory, contained_path
+from flowmap.inventory import MAX_TEXT_BYTES, Inventory, build_inventory, contained_path
 from flowmap.entries import Entry, find_commands, merge_entries
 from flowmap.ir import ClassDef, Function, Module
-from flowmap.lang import adapters
+from flowmap.lang import Adapter, adapters
 
 
 @dataclass
@@ -26,6 +26,27 @@ class Project:
     def name(self) -> str:
         return self.root.name
 
+    def function_language(self, function: str) -> str:
+        """Language semantics of a function, independent of its file suffix."""
+        return self.functions[function].language
+
+    @property
+    def flow_languages(self) -> list[str]:
+        return sorted({module.language for module in self.modules.values()})
+
+    @property
+    def simulation_languages(self) -> list[str]:
+        supported = {adapter.language for adapter in adapters() if adapter.simulation}
+        return sorted(supported & set(self.flow_languages))
+
+    def supports_simulation(self, function: str) -> bool:
+        language = self.function_language(function)
+        return any(adapter.language == language and adapter.simulation for adapter in adapters())
+
+    def require_simulation(self, function: str) -> None:
+        if not self.supports_simulation(function):
+            raise ValueError(f"simulation is not supported for {self.function_language(function)} functions")
+
 
 def load_project(root: str | Path) -> Project:
     root = Path(root).resolve()
@@ -33,25 +54,42 @@ def load_project(root: str | Path) -> Project:
         raise ValueError(f"not a project folder: {root}")
     inventory = build_inventory(root)
     langs = adapters()
-    by_ext = {ext: adapter for adapter in langs for ext in adapter.extensions}
+    by_ext = {ext.lower(): adapter for adapter in langs for ext in adapter.extensions}
     modules: dict[str, Module] = {}
     for rel, item in inventory.files.items():
-        adapter = by_ext.get(Path(rel).suffix)
+        adapter = by_ext.get(Path(rel).suffix.lower())
         if adapter is None:
             continue
         try:
-            source = contained_path(root, rel).read_bytes()
+            target = contained_path(root, rel)
+            if adapter.family == "ecmascript":
+                with target.open("rb") as stream:
+                    source = stream.read(MAX_TEXT_BYTES + 1)
+                if len(source) > MAX_TEXT_BYTES:
+                    continue
+            else:
+                source = target.read_bytes()
         except (OSError, ValueError):
             continue
-        modules[rel] = adapter.extract(rel, source)
+        try:
+            modules[rel] = adapter.extract(rel, source)
+        except RecursionError:
+            continue  # too deeply nested to analyze; the file keeps its structural view
         item.analysis = "semantic"
     commands = find_commands(root)
     candidates: list[Entry] = []
     resolvers: dict[str, object] = {}
+    families: dict[str, list[Adapter]] = {}
     for adapter in langs:
-        own = {f: m for f, m in modules.items() if m.language == adapter.language}
-        resolvers[adapter.language] = adapter.link(root, own)
-        candidates += adapter.entries(root, own, commands)
+        families.setdefault(adapter.family or adapter.language, []).append(adapter)
+    for family in families.values():
+        languages = {adapter.language for adapter in family}
+        own = {f: m for f, m in modules.items() if m.language in languages}
+        resolver = family[0].link(root, own)
+        for adapter in family:
+            resolvers[adapter.language] = resolver
+            language_modules = {f: m for f, m in own.items() if m.language == adapter.language}
+            candidates += adapter.entries(root, language_modules, commands)
     functions = {fid: fn for m in modules.values() for fid, fn in m.functions.items()}
     classes = {cid: c for m in modules.values() for cid, c in m.classes.items()}
     project = Project(root, modules, functions, classes, merge_entries(candidates, functions), resolvers, inventory)

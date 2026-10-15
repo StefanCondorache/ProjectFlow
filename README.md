@@ -1,8 +1,9 @@
 # flowmap
 
 Point it at a project folder; explore its files, folders and observed imports in
-a project map. Python functions also have flow diagrams, data trails and
-simulation. Nothing to configure and no AI: the same code always gives the same
+a project map. Python, TypeScript and JavaScript functions have static flow
+diagrams and data trails; Python also supports simulation. Nothing to configure
+and no AI: the same code always gives the same
 diagram.
 
 ```
@@ -25,11 +26,15 @@ opens a local viewer in the browser (it only reads the folder, never writes to i
   also selects its inspector. Click a dependency's `file:line` citation to
   open and highlight that source line in a 60-line preview, starting up to
   12 lines before it. File and line are preserved in the URL for bookmarks
-  and browser Back. Ordinary previews show the first 60 lines. A Python
-  file's inspector offers *Open flow* for its analyzed functions.
+  and browser Back. Ordinary previews show the first 60 lines. An analyzed
+  Python, TypeScript or JavaScript file's inspector offers *Open flow* for its
+  functions and shows diagnostics when analysis is partial.
 - **Entry points**: the program's starts, found on their own: Docker/compose
   commands (following shell scripts they run), `pyproject` scripts, packages run
-  with `python -m`, and `if __name__ == "__main__"` scripts, grouped with the
+  with `python -m`, and `if __name__ == "__main__"` scripts. Literal Node
+  launch commands and `package.json` scripts/bin/main source files also identify
+  executable JavaScript modules; `tsx` and `ts-node` commands identify TypeScript
+  launches. Entries are grouped with the
   deployed ones first. Opening an entry switches to its function flow; in flow
   mode, the navigation search finds any analyzed function by name.
 - **Flow**: START on the left, END on the right (⇄ turns it top-down), the steps
@@ -45,7 +50,7 @@ opens a local viewer in the browser (it only reads the folder, never writes to i
     function that hands it back to its caller.
   - *Steps*: the flow sliced to the data: only the steps that touch it, with every
     call it enters opened.
-- **Simulation**: ▶ Simulate sends data through the diagram. First it shows
+- **Simulation (Python)**: ▶ Simulate sends data through the diagram. First it shows
   what the run can be given: the variables where it starts (with their types,
   what the code already knows of them, and an *example* of the JSON each one
   takes, built from the annotations, so an `Order` parameter gets
@@ -109,19 +114,31 @@ such as `src/shop/orders.py::OrderService.place`.
 Project structure works for every language and file type. Inventory languages
 appear in the navigation, independently of semantic analysis support.
 
+| Language | Function flows | Static data trails | Simulation |
+| --- | --- | --- | --- |
+| Python | Yes | Yes | Yes |
+| TypeScript / TSX (`.ts`, `.tsx`, `.mts`, `.cts`) | Yes | Yes | No |
+| JavaScript / JSX (`.js`, `.jsx`, `.mjs`, `.cjs`) | Yes | Yes | No |
+| Other languages | File/folder map only | No | No |
+
 - Resolved imports between Python project modules are shown as verified
   dependency links, with file and line evidence. Unresolved references and
   external modules remain inferred.
-- JavaScript and TypeScript imports are scanned conservatively from text and
-  shown as inferred, dashed links. This includes common static imports,
-  re-exports and literal `require` calls; computed module names and runtime
-  loading can be missed.
+- JavaScript and TypeScript use dedicated Tree-sitter parsers for functions,
+  methods, control flow and import/export bindings. Relative ES imports,
+  re-exports and literal CommonJS bindings can resolve to project modules;
+  verified links retain source evidence. External and unresolved imports stay
+  inferred. Emitted `.js` references can resolve to TypeScript source, and
+  directory imports can resolve to an index file.
 - Other languages receive file/folder structure and readable text previews.
 
-Function flows, data trails and simulation currently support Python. Each
-semantic language adapter (`src/flowmap/lang/`) turns source into a shared
+Each semantic language adapter (`src/flowmap/lang/`) turns source into a shared
 model; the structural map and viewer work without one. Import links represent
 observed dependencies, not execution order.
+
+The planned rollout after TypeScript/JavaScript is Java → Rust → PHP → Shell →
+C++ → Go. Python is already supported. These later adapters are planned;
+recognizing their files in the map does not provide function analysis.
 
 ## How calls are resolved
 
@@ -129,15 +146,34 @@ Statically: names, imports (absolute, relative, re-exports, script folders),
 `self`/`super()`, classes, and types from annotations, constructor calls and
 return values. Each resolved call is marked *exact*, *inferred* or *guess*
 (guesses are drawn with a dashed border); calls that cannot be resolved are left
-out rather than invented. Values are the simulation's part (above); tracing a
+out rather than invented. JavaScript/TypeScript calls resolve only when lexical
+scope, imports or justified receiver types select a single target. Shadowed
+names, reassigned bindings, computed imports and uncertain dynamic dispatch
+remain unresolved. Values are the simulation's part (above); tracing a
 real run would be a later, optional layer.
 
 ## Limitations
 
 **Diagrams**
 
-- Function flows are Python only. Structural project maps work for all file
-  types; import enrichment currently covers Python and inferred JS/TS imports.
+- Function flows and static data trails support Python, TypeScript and
+  JavaScript. Structural project maps work for all file types. JavaScript and
+  TypeScript simulation is unavailable; simulation controls follow the current
+  function's declared language and advertised capabilities.
+- JavaScript/TypeScript analysis is conservative: callbacks and dynamic call
+  targets, path aliases, package `exports` conditions and runtime module loading
+  are not resolved. TypeScript types provide evidence without a compiler or
+  language server. Parser errors and unsupported control flow, including switch
+  fallthrough, produce partial-analysis diagnostics; diagrams can omit those
+  portions. JSX/TSX markup is parsed without inventing calls from tag text.
+  Calls to a method or CommonJS export whose name is assigned as a property
+  anywhere in the project (`obj.save = ...`, `this.save = this.save.bind(this)`)
+  stay unresolved, as do calls through `this` or a type annotation to a member
+  that a loaded subclass redefines (as a method or field; a subclass whose parent
+  cannot be resolved counts as a possible override). Replacement through fully
+  computed keys (`obj[key] = ...`) or reflection (`Object.assign`,
+  `Object.defineProperty`, `eval`) is not detected. Files nested too deeply to
+  analyze keep their structural map view.
 - Project maps exclude ignored/generated directories and files outside the
   project, including symlinks that escape it. Large maps and text previews are
   bounded; maps show at most 200 visible items. The folder browser can reach
@@ -149,7 +185,10 @@ real run would be a later, optional layer.
   callbacks, `getattr`, registries or dependency injection cannot be followed,
   and are left out rather than guessed.
 - Entry points come from Dockerfiles, compose files, Procfiles, shell scripts,
-  `pyproject` scripts, `__main__` packages and main guards. Web routes, task
+  `pyproject` scripts, `__main__` packages, main guards, literal Node/TypeScript
+  launchers and `package.json` script/bin/main declarations. TypeScript entry
+  discovery follows its actual launcher; it does not assume arbitrary TypeScript
+  configurations run under plain Node. Web routes, task
   queues, cron jobs, Makefiles and CI files are not read; their functions can
   still be opened from the search box.
 - Only what explains the flow is drawn, so plain computations are hidden, and so
@@ -215,6 +254,12 @@ real run would be a later, optional layer.
   containers are shown up to 50 items.
 
 ## Development
+
+Python 3.11 or newer is required. Installation includes the official
+`tree-sitter-python`, `tree-sitter-javascript` and `tree-sitter-typescript`
+grammars. Loading a project does not download grammars, compile its source,
+install its dependencies or execute its code. Node and npm are needed to develop
+and build the viewer, not to analyze a JavaScript or TypeScript project.
 
 ```
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"

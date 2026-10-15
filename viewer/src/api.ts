@@ -25,6 +25,22 @@ export interface SearchHit {
   doc: string | null;
 }
 
+/** Simulation is a language capability of a function flow. */
+export function supportsSimulation(project: ProjectInfo | null, view: ViewState | null): boolean {
+  if (!project || !view || view.mode === "map" || view.at || view.var) return false;
+  const parts = view.root.split("::");
+  if (parts.length !== 2 || !parts[0] || !parts[1].trim()) return false;
+  const file = parts[0];
+  // Only old payloads without a language mapping fall back to Python suffixes.
+  // A declared mapping can intentionally classify a .py file differently.
+  const language = project.file_languages === undefined
+    ? file.endsWith(".py") && project.files.includes(file) ? "python" : undefined
+    : project.file_languages?.[file];
+  if (typeof language !== "string" || !language || language === "unknown") return false;
+  const supported = project.capabilities === undefined ? ["python"] : project.capabilities?.simulation_languages;
+  return Array.isArray(supported) && supported.includes(language);
+}
+
 export function languageName(language: string): string {
   const names: Record<string, string> = { python: "Python", javascript: "JavaScript", typescript: "TypeScript", markdown: "Markdown", json: "JSON", yaml: "YAML", toml: "TOML", html: "HTML", css: "CSS", shell: "Shell", unknown: "Other files" };
   return names[language] ?? language;

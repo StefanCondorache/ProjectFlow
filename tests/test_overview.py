@@ -25,7 +25,7 @@ def test_unknown_language_has_a_map(tmp_path):
     assert graph.overview["total_files"] == 1
 
 
-def test_inventory_classifies_all_files_without_changing_semantic_stats(tmp_path):
+def test_inventory_classifies_all_files_and_counts_supported_semantic_files(tmp_path):
     write(tmp_path, "app.py", "def run():\n    pass\n")
     write(tmp_path, "main.ts", "export const value = 1")
     write(tmp_path, "package.json", "{}")
@@ -39,16 +39,17 @@ def test_inventory_classifies_all_files_without_changing_semantic_stats(tmp_path
         "README.md": "document", "photo.png": "asset", "Dockerfile": "config",
     }
     assert nodes["app.py"].detail["analysis"] == "semantic"
-    assert nodes["main.ts"].detail["analysis"] == "imports"
+    assert nodes["main.ts"].detail["analysis"] == "semantic"
     assert nodes["photo.png"].detail["readable"] is False
     assert nodes["app.py"].detail["functions"][0]["id"] == "app.py::run"
     summary = project_summary(project)
-    assert summary["stats"]["files"] == 1 and summary["files"] == ["app.py"]
+    assert summary["stats"]["files"] == 2 and summary["files"] == ["app.py", "main.ts"]
     assert summary["inventory"]["files"] == 6
-    assert summary["inventory"]["parsed_files"] == 1
+    assert summary["inventory"]["parsed_files"] == 2
     assert summary["inventory"]["languages"]["typescript"] == 1
     assert summary["capabilities"] == {
-        "overview": True, "flow_languages": ["python"], "simulation_languages": ["python"],
+        "overview": True, "flow_languages": ["python", "typescript"],
+        "trail_languages": ["python", "typescript"], "simulation_languages": ["python"],
     }
 
 
@@ -64,7 +65,7 @@ def test_collapsed_folders_aggregate_dependencies_and_expansion_restores_files(t
     assert len(closed.edges) == 1
     edge = closed.edges[0]
     assert (edge.source, edge.target, edge.kind, edge.count, edge.confidence) == (
-        "dir:app", "dir:lib", "dependency", 2, "inferred",
+        "dir:app", "dir:lib", "dependency", 2, "verified",
     )
     assert edge.data == []
     assert {e["file"] for e in edge.evidence} == {"app/one.ts", "app/two.ts"}
@@ -90,14 +91,14 @@ def test_python_dependencies_resolve_relative_and_script_imports_and_keep_eviden
     assert not any(n.id.startswith("external:.") for n in graph.nodes)
 
 
-def test_javascript_scanner_ignores_comments_strings_and_unresolved_relative_paths(tmp_path):
+def test_javascript_imports_ignore_comments_strings_and_unresolved_relative_paths(tmp_path):
     write(tmp_path, "main.js", "// import './fake';\nconst s = \"import './fake'\";\n/* require('./fake') */\nimport value from './value.js';\nconst fs = require('node:fs');\nexport { value } from './value.js';\nimport('./value.js');\nimport './missing';\n")
     write(tmp_path, "value.ts", "export const value = 1")
     write(tmp_path, "fake.js")
     graph = build_overview(load_project(tmp_path))
     assert not any(e.target == "file:fake.js" for e in graph.edges)
     edge = next(e for e in graph.edges if e.target == "file:value.ts")
-    assert edge.count == 3 and edge.confidence == "inferred"
+    assert edge.count == 3 and edge.confidence == "verified"
     assert [e["line"] for e in edge.evidence] == [4, 6, 7]
     assert any(n.id == "external:node:fs" for n in graph.nodes)
     assert not any(n.id == "external:./missing" for n in graph.nodes)
@@ -183,11 +184,11 @@ def test_invalid_focus_is_rejected_instead_of_falling_back(tmp_path):
 def test_map_mermaid_distinguishes_inferred_edges_and_folder_frames(tmp_path):
     from flowmap.mermaid import to_mermaid
 
-    write(tmp_path, "src/a.ts", "import '../lib/b';")
+    write(tmp_path, "src/a.ts", "import '../lib/b';\nimport 'external-package';")
     write(tmp_path, "lib/b.ts")
     project = load_project(tmp_path)
     closed = to_mermaid(build_overview(project))
-    assert "subgraph" not in closed and "-.->" in closed
+    assert "subgraph" not in closed and "-.->" in closed and " --> " in closed
     opened = to_mermaid(build_overview(project, expanded={"dir:src"}))
     assert 'subgraph n1["src"]' in opened or 'subgraph n0["src"]' in opened
     assert "a.ts" in opened

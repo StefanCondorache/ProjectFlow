@@ -205,6 +205,7 @@ def _sources(item: Item) -> list[str]:
 
 def needs(project: Project, root: str) -> dict:
     """Environment variables and command-line parsing in the code reachable from ``root``."""
+    project.require_simulation(root)  # reads Python-specific env/argv idioms
     seen: set[str] = set()
     todo = [root]
     files: set[str] = set()

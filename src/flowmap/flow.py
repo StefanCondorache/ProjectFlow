@@ -26,7 +26,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from flowmap.ir import Call, Function, Handler, If, Item, Loop, Match, Raise, Return, Try, walk
+from flowmap.ir import Call, Function, Handler, If, Item, Loop, Match, Raise, Return, Try, call_results, callable_params, constructor, is_generated, walk
 from flowmap.project import Project
 
 if TYPE_CHECKING:
@@ -57,6 +57,7 @@ class Edge:
     count: int | None = None
     confidence: str | None = None
     evidence: list[dict] | None = None
+    generated_data: list[str] | None = None  # explicit subset of data; None is a legacy/unspecified edge
 
 
 @dataclass
@@ -111,7 +112,7 @@ def build_flow(
 
 
 def display_name(project: Project, fn: Function) -> str:
-    if fn.name == "__init__" and fn.cls in project.classes:
+    if constructor(fn) and fn.cls in project.classes:
         return f"{project.classes[fn.cls].name}()"
     if fn.name == "<main>":
         return fn.file
@@ -146,8 +147,8 @@ def has_content(fn: Function) -> bool:
     return False
 
 
-def _data_label(names: list[str]) -> str:
-    return ", ".join("result" if n.startswith("$") else n for n in dict.fromkeys(names))
+def _data_label(fn: Function, names: list[str]) -> str:
+    return ", ".join("result" if is_generated(fn, n) else n for n in dict.fromkeys(names))
 
 
 class _Fragment:
@@ -165,6 +166,7 @@ class _Fragment:
     ):
         self.project = project
         self.fn = fn
+        self.results = call_results(fn)
         self.prefix = prefix
         self.path = path
         self.trail = trail
@@ -174,8 +176,7 @@ class _Fragment:
         self.carries: dict[str, list[str]] = {}  # node id -> variables its outgoing flow edges carry
         self.end = f"{prefix}e"
 
-        skip_self = bool(fn.cls and fn.params and "staticmethod" not in fn.decorators)
-        params = [p.name for p in fn.params[1 if skip_self else 0 :]]
+        params = [p.name for p in callable_params(fn)]
         inner = parent is not None
         start = self._node(
             "start",
@@ -184,6 +185,7 @@ class _Fragment:
             key="s",
             inner=inner,
             function=fn.id,
+            language=fn.language,
             file=fn.file,
             line=fn.line,
             params=params,
@@ -191,7 +193,7 @@ class _Fragment:
         )
         carried = trail.names.get(start, []) if trail is not None else params
         self.carries[start] = list(carried)
-        ports = self._seq(fn.body, [(start, _data_label(carried), "flow")], parent)
+        ports = self._seq(fn.body, [(start, _data_label(fn, carried), "flow")], parent)
         self.nodes.append(Node(self.end, "end", "END", parent, {"inner": inner}))
         self._connect(ports, self.end)
 
@@ -211,7 +213,8 @@ class _Fragment:
     def _connect(self, ports: list[Port], target: str, fallback_label: str = "") -> None:
         for source, label, kind in ports:
             data = self.carries.get(source, []) if kind == "flow" and label else []
-            self.edges.append(Edge(source, target, label or fallback_label, kind, list(data)))
+            self.edges.append(Edge(source, target, label or fallback_label, kind, list(data),
+                                   generated_data=[n for n in data if is_generated(self.fn, n)]))
 
     def _seq(self, items: list[Item], ports: list[Port], parent: str | None) -> list[Port]:
         for item in items:
@@ -236,8 +239,8 @@ class _Fragment:
         if self.trail is not None:
             self.carries[nid] = list(self.trail.names.get(nid, []))
         else:
-            self.carries[nid] = [d for d in call.defs if not d.startswith("$")]
-        return _data_label(self.carries[nid])
+            self.carries[nid] = [d for d in self.results[id(call)] if not is_generated(self.fn, d)]
+        return _data_label(self.fn, self.carries[nid])
 
     # items
 
@@ -333,7 +336,7 @@ class _Fragment:
             text=call.text,
             confidence=call.confidence,
             args=[a.text for a in call.args],
-            defs=[d for d in call.defs if not d.startswith("$")],
+            defs=[d for d in self.results[id(call)] if not is_generated(self.fn, d)],
         )
         if call.kind == "class":
             cls = project.classes.get(call.target or "")
@@ -344,7 +347,7 @@ class _Fragment:
             )
         fn = project.functions[call.target]
         doc = fn.doc
-        if doc is None and fn.name == "__init__" and fn.cls in project.classes:
+        if doc is None and constructor(fn) and fn.cls in project.classes:
             doc = project.classes[fn.cls].doc
         recursive = fn.id in self.path
         return self._node(
@@ -371,5 +374,5 @@ class _Fragment:
             external=call.external,
             line=call.line,
             text=call.text,
-            defs=[d for d in call.defs if not d.startswith("$")],
+            defs=[d for d in self.results[id(call)] if not is_generated(self.fn, d)],
         )

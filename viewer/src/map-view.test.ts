@@ -83,6 +83,48 @@ describe("map navigation", () => {
 });
 
 describe("map inspector", () => {
+  it.each(["javascript", "typescript"])("explains static features and partial diagnostics for %s without claiming simulation", (language) => {
+    const suffix = language === "javascript" ? "js" : "ts";
+    const path = `src/main.${suffix}`;
+    const node: FlowNode = { id: `file:${path}`, kind: "module", label: `main.${suffix}`, parent: null, detail: {
+      path, language, analysis: "partial", functions: [{ id: `${path}::run@3:0`, label: "run", line: 3 }],
+      diagnostics: [{ code: "syntax-error", message: "Some syntax could not be analyzed.", line: 8, col: 2, severity: "warning" }],
+    } };
+    const graph: FlowGraph = { root: "@project", nodes: [node], edges: [] };
+    const html = renderToStaticMarkup(createElement(MapDetails, { node, graph, onToggle: () => undefined, onFocus: () => undefined, onEnter: () => undefined, onClose: () => undefined }));
+    expect(html).toContain("Static function flows and data trails");
+    expect(html).toContain("Simulation is unavailable");
+    expect(html).toContain("Partial analysis");
+    expect(html).toContain("Some syntax could not be analyzed.");
+    expect(html).toContain("syntax-error");
+    expect(html).toContain("line 8");
+    expect(html).toContain("column 2");
+    expect(html).toContain("Open flow");
+    expect(html).not.toContain("Full support");
+    expect(html).not.toContain("Function flows available</dd>");
+  });
+
+  it("does not advertise semantic features for a structural JavaScript file", () => {
+    const node: FlowNode = { id: "file:main.js", kind: "module", label: "main.js", parent: null, detail: { path: "main.js", language: "javascript", analysis: "imports" } };
+    const html = renderToStaticMarkup(createElement(MapDetails, { node, graph: { root: "@project", nodes: [node], edges: [] }, onToggle: () => undefined, onFocus: () => undefined, onEnter: () => undefined, onClose: () => undefined }));
+    expect(html).toContain("Inferred imports");
+    expect(html).not.toContain("Static function flows and data trails");
+  });
+
+  it("describes only the semantic features declared for the selected file's language", () => {
+    const node: FlowNode = { id: "file:main.ts", kind: "module", label: "main.ts", parent: null, detail: { path: "main.ts", language: "typescript", analysis: "semantic", functions: [{ id: "main.ts::run@1:0", label: "run", line: 1 }] } };
+    const project: ProjectInfo = {
+      name: "Mixed", root: "/project", files: ["main.ts"], entries: [],
+      stats: { files: 1, functions: 1, classes: 0, calls: 0, project_calls: 0 }, file_languages: { "main.ts": "typescript" },
+      capabilities: { overview: true, flow_languages: ["typescript"], trail_languages: [], simulation_languages: [] },
+    };
+    const html = renderToStaticMarkup(createElement(MapDetails, { node, project, graph: { root: "@project", nodes: [node], edges: [] }, onToggle: () => undefined, onFocus: () => undefined, onEnter: () => undefined, onClose: () => undefined }));
+    expect(html).toContain("Static function flows are available");
+    expect(html).not.toContain("data trails are available");
+    expect(html).toContain("Simulation is unavailable for TypeScript");
+    expect(html).toContain("Open flow");
+  });
+
   it("requests sixty source lines around a cited line while retaining the ordinary preview", async () => {
     const requested: string[] = [];
     vi.stubGlobal("fetch", async (url: string) => { requested.push(url); return new Response(JSON.stringify({ file: "src/a.ts", start: 138, lines: [] })); });

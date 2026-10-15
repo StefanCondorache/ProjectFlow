@@ -43,8 +43,8 @@ DEPLOY_PATTERNS = (
 )
 
 # Lower is more official. Kinds with equal rank keep this order of preference.
-KIND_ORDER = ("compose", "docker", "procfile", "pyproject", "shell", "package-main", "main-guard")
-RANK = {"compose": 0, "docker": 0, "procfile": 0, "pyproject": 1, "shell": 2, "package-main": 3, "main-guard": 4}
+KIND_ORDER = ("compose", "docker", "procfile", "pyproject", "package-script", "package-bin", "shell", "package-main", "main-guard", "module-script")
+RANK = {"compose": 0, "docker": 0, "procfile": 0, "pyproject": 1, "package-script": 1, "package-bin": 1, "shell": 2, "package-main": 3, "main-guard": 4, "module-script": 4}
 
 _SHELLS = {"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/env"}
 _PREFIXES = {"exec", "nohup", "time", "env", "sudo"}
@@ -72,6 +72,7 @@ class Command:
     kind: str  # compose | docker | procfile | shell
     where: str
     base_dir: str = ""  # directory relative paths are resolved against
+    ambiguous: bool = False  # argv/path depends on unsupported shell interpretation
 
 
 # ── commands ───────────────────────────────────────────────────────────────
@@ -193,6 +194,13 @@ def _shell_variables(text: str) -> dict[str, str]:
 
 def _shell(rel: str, text: str, via: str | None, kind: str) -> list[Command]:
     variables = _shell_variables(text)
+    changes_directory = bool(re.search(
+        r"(?:^|[;&|()])\s*(?:(?:builtin|command)\s+(?:--\s+)?)*(?:cd|pushd|popd)\b",
+        text, re.MULTILINE,
+    ))
+    # The legacy line scanner does not distinguish heredoc payload from code.
+    # Keep its argv results for existing consumers, but do not certify them.
+    opaque_script = changes_directory or "<<" in text
 
     def expand(m: re.Match) -> str:
         name = m.group(1) or m.group(3)
@@ -205,13 +213,16 @@ def _shell(rel: str, text: str, via: str | None, kind: str) -> list[Command]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or _is_assignment(stripped):
             continue
+        # Variable expansion uses a whole-script map, not source-order runtime
+        # bindings. Preserve that legacy argv without treating it as literal.
+        ambiguous = opaque_script or "$" in stripped or "`" in stripped
         stripped = re.sub(r"\$\([^()]*\)", "X", stripped)  # command substitutions become a placeholder
         stripped = _VARIABLE.sub(expand, stripped)
         for part in re.split(r"&&|\|\||;|\||\(|\)", stripped):
             argv = _strip_prefixes(_argv(part.split(" #", 1)[0]))
             if argv:
                 where = f"{via} → {rel}:{lineno}" if via else f"{rel}:{lineno}"
-                commands.append(Command(argv, kind, where, posixpath.dirname(rel)))
+                commands.append(Command(argv, kind, where, posixpath.dirname(rel), ambiguous=ambiguous))
     return commands
 
 
@@ -246,6 +257,8 @@ def _follow_scripts(root: Path, commands: list[Command], depth: int = 0) -> list
             if not path.startswith("..") and (root / path).is_file():
                 text = (root / path).read_text(errors="replace")
                 inner = _shell(path, text, via=command.where, kind=command.kind)
+                for child in inner:
+                    child.ambiguous = child.ambiguous or command.ambiguous
                 out += _follow_scripts(root, inner, depth + 1)
                 break
     return out

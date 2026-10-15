@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from flowmap.flow import item_key
-from flowmap.ir import Assign, Call, Function, If, Item, Loop, Match, Raise, Return, Try
+from flowmap.ir import Assign, Call, Function, If, Item, Loop, Match, Raise, Return, Try, call_results, callable_params, constructor, is_generated, self_name
 from flowmap.project import Project
 
 MUTATORS = {
@@ -56,6 +56,7 @@ class Trail:
     found: bool = False
     truncated: bool = False
     contexts: dict[str, Context] = field(default_factory=dict)  # by prefix, in trace order
+    generated: bool | None = None  # origin's identity; None for legacy manually constructed trails
 
 
 def trace(project: Project, root: str, at: str, var: str) -> Trail:
@@ -79,16 +80,15 @@ def _is_logging(call: Call) -> bool:
 
 def bind(call: Call, callee: Function, hot: set[str]) -> set[str]:
     """Parameters of ``callee`` that receive data from the ``hot`` variables."""
-    params = callee.params
-    skip_self = bool(callee.cls and params and "staticmethod" not in callee.decorators) and (
-        callee.name == "__init__" or "." in call.callee
-    )
-    plist = params[1:] if skip_self else params
+    plist = callable_params(callee, call)
     positional = [p for p in plist if p.kind == "normal"]
     by_name = {p.name: p for p in plist}
     varargs = [p.name for p in plist if p.kind == "vararg"]
     kwargs = [p.name for p in plist if p.kind == "kwarg"]
     tainted: set[str] = set()
+    receiver = self_name(callee)
+    if callee.language != "python" and receiver and set(call.receiver_uses) & hot:
+        tainted.add(receiver)
     index = 0
     for arg in call.args:
         carries = bool(set(arg.uses) & hot)
@@ -120,17 +120,21 @@ class _Tracer:
         self.path_steps = path_steps
         self.contexts = 0
         self.stack: list[Context] = []
+        self.results: dict[str, dict[int, list[str]]] = {}
 
     def context(
         self, fn: Function, prefix: str, hot: set[str], path: frozenset[str], depth: int, parent: str | None = None
     ) -> bool:
         """Trace one function body; True when it returns the data."""
         self.contexts += 1
+        if fn.id not in self.results:
+            self.results[fn.id] = call_results(fn)
         hot = set(hot)
         start = f"{prefix}s"
         if start == self.trail.origin:
             hot.add(self.trail.var)
             self.trail.found = True
+            self.trail.generated = is_generated(fn, self.trail.var)
         self.trail.names[start] = sorted(hot)
         ctx = Context(prefix, fn.id, parent, sorted(hot), active=bool(hot))
         self.trail.contexts[prefix] = ctx
@@ -236,11 +240,14 @@ class _Tracer:
         args_hot = any(set(a.uses) & hot for a in call.args)
         receiver_hot = bool(set(call.receiver_uses) & hot)
         out = kept = False
+        caller = self.project.functions[self.stack[-1].function]
+        results = self.results[caller.id][id(call)]
 
         if call.kind in ("project", "class"):
             fn = self.project.functions.get(call.target or "") if call.kind == "project" else None
             entered = False
-            if fn is not None and (args_hot or on_path) and not is_origin:
+            receiver_enters = fn is not None and fn.language != "python" and self_name(fn) and receiver_hot
+            if fn is not None and (args_hot or receiver_enters or on_path) and not is_origin:
                 if fn.id not in path and depth < MAX_DEPTH and self.contexts < MAX_CONTEXTS:
                     self.trail.opened.add(nid)
                     out = self.context(fn, f"{nid}/", bind(call, fn, hot), path | {fn.id}, depth + 1, prefix)
@@ -249,12 +256,12 @@ class _Tracer:
                     self.trail.truncated = True
             if not entered and args_hot:
                 out = True  # could not look inside: assume the data comes back out
-            constructs = call.kind == "class" or (fn is not None and fn.name == "__init__")
+            constructs = call.kind == "class" or (fn is not None and constructor(fn))
             out = out or receiver_hot or (constructs and args_hot)  # a new object holds what it was given
             kept = entered or args_hot or receiver_hot or on_path or is_origin
         elif not _is_logging(call):
             out = args_hot or receiver_hot
-            named_result = any(not d.startswith("$") for d in call.defs)
+            named_result = any(not is_generated(caller, d) for d in results)
             receiver = call.receiver_uses[0] if len(call.receiver_uses) == 1 else None
             method = call.callee.rsplit(".", 1)[-1]
             if args_hot and receiver and method in MUTATORS:
@@ -272,19 +279,23 @@ class _Tracer:
                     self.trail.uses.add(nid)
 
         hot = set(hot)
-        for name in call.defs:
+        for name in set(call.defs) | set(results):
             if out:
                 hot.add(name)
             else:
                 hot.discard(name)
         if is_origin:
             hot.add(self.trail.var)
+            if results != call.defs and self.trail.var in results:
+                hot.update(call.defs)
+                hot.update(results)
             self.trail.found = True
+            self.trail.generated = is_generated(self.project.functions[self.stack[-1].function], self.trail.var)
         if args_hot or receiver_hot or is_origin:
             self.stack[-1].active = True
         if kept:
             self.trail.keep.add(nid)
-            self.trail.names[nid] = [d for d in call.defs if d in hot]
+            self.trail.names[nid] = [d for d in results if d in hot]
             if call.io and call.kind not in ("project", "class"):
                 self.stack[-1].io.append((nid, call.text, list(call.io)))
         return hot, kept

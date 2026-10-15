@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from flowmap.flow import build_flow, display_name, item_key
-from flowmap.ir import Assign, Break, Call, Continue, Function, Handler, If, Item, Loop, Match, Raise, Return, Try, self_name, walk
+from flowmap.ir import Assign, Break, Call, Continue, Function, Handler, If, Item, Loop, Match, Raise, Return, Try, constructor, self_name, walk
 from flowmap.lang.python.evaluate import (
     BUILTIN_TYPES,
     EvalError,
@@ -106,6 +106,7 @@ def simulate(
     start_at: str | None = None,
     auto_open: bool = False,
 ) -> Simulation:
+    project.require_simulation(root)
     runner = _Runner(project, root, expanded, start_label, choices or {}, inputs or {}, env, argv, provided or {}, start_at, auto_open)
     runner.run()
     return runner.sim
@@ -115,6 +116,7 @@ def expects(project: Project, root: str, expanded: set[str] | frozenset[str] = f
     """What there is at node ``at`` for a walk started there: the variables in
     scope (value so far, type, JSON template), plus the environment variables
     and command line the code reads."""
+    project.require_simulation(root)
     runner = _Runner(project, root, expanded, None, {}, {}, None, None, {}, at, False, probe=True)
     runner.run()
     found = runner.probed or {"reached": False, "vars": {}}
@@ -483,7 +485,7 @@ class _Runner(Outside, Given):
 
     def call_function(self, call: Call, fn: Function, nid: str, caller: _Scope, args, kwargs, receiver, quiet: bool):
         self_obj = None
-        constructing = fn.name == "__init__" and not call.callee.endswith("__init__")
+        constructing = constructor(fn) and not call.callee.endswith("__init__")
         if self_name(fn):
             if constructing:
                 self_obj = self.new_object(fn.cls)
@@ -516,7 +518,7 @@ class _Runner(Outside, Given):
         """Run a closed step's function without frames, for its result and side effects."""
         depth = sum(1 for s in self.stack if s.quiet)
         if fn.id in scope.path or depth >= SILENT_DEPTH:
-            return self.new_object(fn.cls) if fn.name == "__init__" else Unknown(call.text)
+            return self.new_object(fn.cls) if constructor(fn) else Unknown(call.text)
         outermost = depth == 0
         if outermost:
             self.budget = 0
@@ -528,7 +530,7 @@ class _Runner(Outside, Given):
             return Unknown(call.text)
         except RecursionError:
             return Unknown(call.text)
-        if isinstance(value, Unknown) and fn.name != "__init__":
+        if isinstance(value, Unknown) and not constructor(fn):
             return Unknown(call.text)  # say it in the caller's words
         return value
 
@@ -924,6 +926,8 @@ class _Runner(Outside, Given):
         args, kwargs = self.arguments(call, scope)
         receiver = self.value(call.receiver, scope) if call.receiver else None
         fn = self.project.functions.get(call.target or "") if call.kind == "project" else None
+        if fn is not None:
+            self.project.require_simulation(fn.id)
         label = display_name(self.project, fn) if fn is not None else call.text
         drawn = nid in self.nodes and not scope.quiet
 

@@ -22,9 +22,12 @@ class Adapter:
     extract: Callable[[str, bytes], Module]
     link: Callable[[Path, dict[str, Module]], object]  # returns the language's type resolver
     entries: Callable[[Path, dict[str, Module], list[Command]], list[Entry]]
+    simulation: bool = False
+    family: str = ""
 
 
 def adapters() -> list[Adapter]:
+    from flowmap.lang.ecmascript import ADAPTERS as ecmascript
     from flowmap.lang.python import ADAPTER as python
 
-    return [python]
+    return [python, *ecmascript]

@@ -177,6 +177,8 @@ def extract_relationships(project: Project) -> list[Relationship]:
     relationships = []
     for file, item in project.inventory.files.items():
         module = project.modules.get(file)
+        if module is not None and module.diagnostics:
+            item.analysis = "partial"
         if module is not None and module.language == "python":
             resolver = project.resolvers.get("python")
             if resolver is None:
@@ -207,7 +209,29 @@ def extract_relationships(project: Project) -> list[Relationship]:
                     continue
                 text = lines[imp.line - 1].strip()[:300] if 0 < imp.line <= len(lines) else ""
                 relationships.append(Relationship(file, target, confidence, {"file": file, "line": imp.line, "text": text}))
-        elif item.language in ("javascript", "typescript"):
+        elif module is not None and module.language in ("javascript", "typescript"):
+            # Parsed source has authoritative AST import/shadowing evidence.
+            # Never replace it with the structural lexical fallback, even if
+            # a consumer constructs a project without its language resolver.
+            resolver = project.resolvers.get(module.language)
+            if resolver is None:
+                continue
+            source = read_text(project.root, file)
+            lines = source.splitlines() if source is not None else []
+            imports = {(imp.module, imp.line): imp for imp in module.imports}
+            for imp in sorted(imports.values(), key=lambda imp: (imp.line, imp.module)):
+                ref = resolver.module_ref(file, imp.module)
+                if ref is None:
+                    continue
+                if ref.kind == "module" and ref.key in project.inventory.files:
+                    target, confidence = f"file:{ref.key}", "verified"
+                elif ref.kind == "external":
+                    target, confidence = f"external:{ref.key}", "inferred"
+                else:
+                    continue
+                text = lines[imp.line - 1].strip()[:300] if 0 < imp.line <= len(lines) else ""
+                relationships.append(Relationship(file, target, confidence, {"file": file, "line": imp.line, "text": text}))
+        elif module is None and item.language in ("javascript", "typescript"):
             source = read_text(project.root, file)
             if source is None:
                 continue
@@ -251,6 +275,9 @@ def build_overview(project: Project, path: str = "", expanded: set[str] | frozen
         detail = {"path": file, "category": item.category, "language": item.language,
                   "size": item.size, "readable": item.readable, "analysis": item.analysis,
                   "functions": [{"id": fn.id, "label": display_name(project, fn), "line": fn.line} for fn in functions]}
+        module = project.modules.get(file)
+        if module is not None and module.diagnostics:
+            detail["diagnostics"] = module.diagnostics
         node = Node(ident, item.category, posixpath.basename(file), parent, detail)
         nodes[ident] = node
         graph.nodes.append(node)

@@ -2138,6 +2138,10 @@ kbd { padding: 1px 4px; border: 1px solid var(--hairline); border-radius: 3px; b
 .map-functions button > code { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .map-functions button > span { color: var(--muted); font: 10px var(--sans); }
 .map-functions small { flex-shrink: 0; color: var(--muted); font: 10px var(--sans); }
+.analysis-diagnostics { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.analysis-diagnostics li { padding: 10px; border: 1px solid var(--hairline); border-radius: 6px; overflow-wrap: anywhere; }
+.analysis-diagnostics p { margin: 0 0 6px; font-size: 12px; line-height: 1.6; }
+.analysis-diagnostics li > span { color: var(--muted); font-size: 11px; }
 .swatch-folder { border-color: var(--decision); border-radius: 2px; background: var(--decision-tint); }
 .swatch-dependency, .swatch-inferred { width: 17px; height: 0; border: 0; border-top: 1.5px solid var(--edge); border-radius: 0; background: none; }
 .swatch-inferred { border-top-style: dashed; }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { api, readHash, toggleFolderExpansion, writeHash, type ViewState } from "./api";
+import { api, readHash, supportsSimulation, toggleFolderExpansion, writeHash, type ViewState } from "./api";
 import { Details } from "./Details";
+import { followingLabel } from "./data-labels";
 import { Diagram, type TokenRun } from "./Diagram";
 import { Icon } from "./Icon";
 import { MapDetails } from "./MapDetails";
@@ -57,7 +58,7 @@ export function App() {
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [view, setView] = useState<ViewState | null>(null);
   const map = !view || view.mode === "map";
-  const supportsSimulation = Boolean(view && !map && !view.at && view.root.split("::")[0].endsWith(".py") && (project?.capabilities?.simulation_languages ?? ["python"]).includes("python"));
+  const canSimulate = supportsSimulation(project, view);
   const currentView = useRef(view);
   currentView.current = view;
   const [graph, setGraph] = useState<FlowGraph | null>(null);
@@ -341,7 +342,7 @@ export function App() {
   };
 
   const openSetup = (at: string | null, label: string) => {
-    if (!view || !supportsSimulation) return;
+    if (!view || !canSimulate) return;
     const base = sim?.setup ?? NO_SETUP;
     const setup = { ...base, at, inputs: at === base.at ? base.inputs : {} };
     const request = ++setupRequest.current;
@@ -358,7 +359,7 @@ export function App() {
   };
 
   const runSimulation = async (setup: SimSetup) => {
-    if (!view || !supportsSimulation) return;
+    if (!view || !canSimulate) return;
     const request = ++simulationRequest.current;
     const active = () => request === simulationRequest.current && simKey === currentSimKey.current;
     setSimBusy(true);
@@ -378,7 +379,7 @@ export function App() {
 
   /** Walk again with other data or answers, staying at the same frame. */
   const rerun = async (setup: SimSetup, choices: Record<string, string>, index: number, advance = false) => {
-    if (!view || !supportsSimulation) return;
+    if (!view || !canSimulate) return;
     const request = ++simulationRequest.current;
     const active = () => request === simulationRequest.current && simKey === currentSimKey.current;
     setSimBusy(true);
@@ -534,7 +535,7 @@ export function App() {
           {(!map || view?.path) && <button onClick={() => focusMap("")} title="Return to the full project map"><Icon name="panels" />{map ? "Back to project" : "Project map"}</button>}
           {!map && view?.at && view.var ? (
             <div className="following">
-              Following <code>{view.var.startsWith("$") ? "a call's result" : view.var}</code>
+              Following <code>{followingLabel(view.var, graphView?.view === view ? graph?.trail?.generated : undefined, project?.file_languages?.[view.root.split("::")[0]])}</code>
               {graph?.trail?.truncated && <span className="following-note"> (cut short: very long trail)</span>}
               <div className="segmented" role="group" aria-label="Show the data as">
                 <button
@@ -581,7 +582,7 @@ export function App() {
           <button onClick={copyMermaid} disabled={!diagramReady || updating} title="Copy this diagram as Mermaid text">
             <Icon name="code" /> <span>Copy Mermaid</span>
           </button>
-          {supportsSimulation &&
+          {canSimulate &&
             (sim ? (
               <button className="primary" onClick={stopSimulation} title="Stop the simulation">
                 <Icon name="stop" /> Stop
@@ -602,7 +603,7 @@ export function App() {
             {map ? <><span><b>+</b> opens a folder in place</span><span>Select a file to see imports, source, and supported function flows</span><span>Arrows show imports; dashed links are inferred</span></> : <>
               <span><b>+</b> opens a step in place</span>
               <span>click a <u>data label</u> to follow that value through the code</span>
-              <span><b>▶ Simulate</b> sends data through the diagram (space pauses, ← → step)</span>
+              {canSimulate ? <span><b>▶ Simulate</b> sends data through the diagram (space pauses, ← → step)</span> : <span>Static flows and data trails; simulation is available for supported languages only</span>}
             </>}
             <button
               onClick={() => {
@@ -718,13 +719,13 @@ export function App() {
             />
           ) : (
             selectedNode && (
-              map && graph ? <MapDetails node={selectedNode} graph={graph} sourceLine={selectedNode.detail.path === view?.path ? view?.line : undefined} onToggle={toggle} onFocus={focusMap} onEnter={enter} onClose={closeDetails} /> : <Details
+              map && graph ? <MapDetails node={selectedNode} graph={graph} project={project ?? undefined} sourceLine={selectedNode.detail.path === view?.path ? view?.line : undefined} onToggle={toggle} onFocus={focusMap} onEnter={enter} onClose={closeDetails} /> : <Details
                 node={selectedNode}
                 following={Boolean(view?.at)}
                 onToggle={toggle}
                 onEnter={enter}
                 onFollow={follow}
-                onSimulateFrom={!supportsSimulation ? undefined : (node) => openSetup(node.id === "s" ? null : node.id, node.label)}
+                onSimulateFrom={!canSimulate ? undefined : (node) => openSetup(node.id === "s" ? null : node.id, node.label)}
                 onClose={closeDetails}
               />
             )

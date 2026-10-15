@@ -18,7 +18,8 @@ export interface ProjectInfo {
   stats: { files: number; functions: number; classes: number; calls: number; project_calls: number };
   entries: Entry[];
   inventory?: { files: number; parsed_files: number; languages: Record<string, number> };
-  capabilities?: { overview: boolean; flow_languages: string[]; simulation_languages: string[] };
+  file_languages?: Record<string, string>;
+  capabilities?: { overview: boolean; flow_languages: string[]; trail_languages?: string[]; simulation_languages: string[] };
 }
 
 export type NodeKind =
@@ -53,6 +54,7 @@ export interface MapDetail {
   expanded?: boolean;
   expandable?: boolean;
   functions?: { id: string; label: string; line: number }[];
+  diagnostics?: { code: string; message: string; line: number; col: number; severity: string }[];
 }
 
 export interface Detail extends MapDetail {
@@ -93,8 +95,9 @@ export interface FlowEdge {
   target: string;
   label: string;
   kind: "flow" | "yes" | "no" | "case" | "error" | "return" | "dependency";
-  /** Variables behind a data label ("$1" is a nested call's result). */
+  /** Variables behind a data label; generated_data identifies synthetic results. */
   data: string[];
+  generated_data?: string[] | null;
   count?: number;
   confidence?: "verified" | "inferred";
   evidence?: Evidence[];
@@ -134,6 +137,7 @@ export interface MapChildrenPage {
 export interface TrailInfo {
   origin: string;
   var: string;
+  generated?: boolean | null;
   truncated: boolean;
   view: "journey" | "steps";
 }
